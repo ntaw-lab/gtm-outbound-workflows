@@ -1,0 +1,1703 @@
+{
+  "name": "Flow 1 — Brief Pipeline",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "brief-pipeline",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "58f8dc68-8e66-59df-8a7f-6a11335e0905",
+      "name": "1. Webhook /brief",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [
+        240,
+        400
+      ],
+      "webhookId": "3b007619-c43f-58e2-abbf-2f6aba18161b"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body || $input.first().json;\nconst url = body.url || body.text || '';\nconst profileMatch = url.match(/linkedin\\.com\\/in\\/([^\\/\\?]+)/);\nconst companyMatch = url.match(/linkedin\\.com\\/company\\/([^\\/\\?]+)/);\nreturn [{ json: {\n  raw_url: url,\n  profile_url: profileMatch ? `https://www.linkedin.com/in/${profileMatch[1]}/` : null,\n  profile_slug: profileMatch?.[1] || null,\n  company_slug: companyMatch?.[1] || null,\n  is_profile: !!profileMatch,\n  slack_user_id: body.user_id || null,\n  slack_channel_id: body.channel_id || 'YOUR_SLACK_CHANNEL_ID_BRIEFS',\n  slack_thread_ts: body.thread_ts || null\n} }];"
+      },
+      "id": "441ffe47-b38a-56e1-81f2-8d08c64436c4",
+      "name": "2. Parse URL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        464,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "Run actor and get dataset",
+        "actorId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "harvestapi~linkedin-profile-scraper"
+        },
+        "customBody": "={\n  \"queries\": [\"{{ $json.profile_url }}\"]\n}"
+      },
+      "id": "261c6342-36dd-5308-9df7-fb539e0b738b",
+      "name": "3a. Apify Profile (slug only)",
+      "type": "@apify/n8n-nodes-apify.apify",
+      "typeVersion": 1,
+      "position": [
+        688,
+        400
+      ],
+      "credentials": {
+        "apifyApi": {
+          "id": null,
+          "name": "Apify"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "Run actor and get dataset",
+        "actorId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "harvestapi~linkedin-company"
+        },
+        "customBody": "={\n  \"companies\": [\"{{ $json.currentPosition[0].companyLinkedinUrl }}\"]\n}"
+      },
+      "id": "9026d988-5497-558c-8c91-f1de60137809",
+      "name": "4. Apify — Scrape Company",
+      "type": "@apify/n8n-nodes-apify.apify",
+      "typeVersion": 1,
+      "position": [
+        912,
+        400
+      ],
+      "credentials": {
+        "apifyApi": {
+          "id": null,
+          "name": "Apify"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "Run actor and get dataset",
+        "actorId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "harvestapi~linkedin-profile-posts"
+        },
+        "customBody": "={\n  \"targetUrls\": [\"https://www.linkedin.com/in/{{ $('2. Parse URL').item.json.profile_slug }}/\"],\n  \"maxPosts\": 3,\n  \"postedLimit\": \"6months\"\n}"
+      },
+      "id": "935209ac-540e-5c81-9617-e0b5261140d1",
+      "name": "8. Apify — Scrape Posts",
+      "type": "@apify/n8n-nodes-apify.apify",
+      "typeVersion": 1,
+      "position": [
+        1568,
+        208
+      ],
+      "credentials": {
+        "apifyApi": {
+          "id": null,
+          "name": "Apify"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "=https://api.hunter.io/v2/email-finder?domain={{ $('4. Apify — Scrape Company').item.json.website }}&first_name={{ $('3. Apify — Scrape Profile').item.json.firstName }}&last_name={{ $('3. Apify — Scrape Profile').item.json.lastName }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "10476e33-e33e-5e15-b374-977bf4487a73",
+      "name": "9a. Enrich — Hunter",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2000,
+        208
+      ],
+      "credentials": {
+        "httpQueryAuth": {
+          "id": null,
+          "name": "Hunter (api_key query)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "h-has-email",
+              "leftValue": "={{ $json.data?.email }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "fb29b255-f34f-5754-b930-193aa26210f8",
+      "name": "9b. IF Hunter found?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2224,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://app.fullenrich.com/api/v1/contact/enrich/bulk",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"name\": \"flow1-{{ $('2. Parse URL').item.json.profile_slug }}\",\n  \"enrich_fields\": [\"email\"],\n  \"datas\": [{\n    \"firstname\": \"{{ $('3. Apify — Scrape Profile').item.json.firstName }}\",\n    \"lastname\": \"{{ $('3. Apify — Scrape Profile').item.json.lastName }}\",\n    \"company_domain\": \"{{ $('4. Apify — Scrape Company').item.json.website }}\",\n    \"linkedin_url\": \"{{ $('3. Apify — Scrape Profile').item.json.linkedinUrl }}\"\n  }]\n}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "fee6c87e-e2d8-5db4-81b4-c814c6bb99ef",
+      "name": "9c. Enrich — FullEnrich",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2448,
+        304
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "FullEnrich (Bearer)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Merge enrichment results into single email/provider pair\n// Last upstream node feeds $input — figure out which provider by shape\nconst j = $input.first().json;\nlet email = null, provider = 'none';\nif (j?.data?.email) { email = j.data.email; provider = 'hunter'; }\nelse if (j?.datas?.[0]?.contact?.emails?.[0]?.email) { email = j.datas[0].contact.emails[0].email; provider = 'fullenrich'; }\nelse if (j?.datas?.[0]?.email) { email = j.datas[0].email; provider = 'fullenrich'; }\nelse if (j?.contacts?.['1']?.data?.emailAddresses?.[0]?.email) { email = j.contacts['1'].data.emailAddresses[0].email; provider = 'lusha'; }\nelse if (j?.people?.[0]?.emails?.[0]?.email) { email = j.people[0].emails[0].email; provider = 'surfe'; }\nelse if (j?.people?.[0]?.email) { email = j.people[0].email; provider = 'surfe'; }\nreturn [{ json: { email, provider, raw: j } }];"
+      },
+      "id": "bcc7eb88-6752-51f3-be5f-8f32ce27d672",
+      "name": "9d. Merge email result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2672,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 4096, temperature: 0, messages: [{ role: 'user', content: [{ type: 'text', text: \"You are the outbound research assistant of <SENDER_NAME>, a freelance GTM engineer. Build an actionable brief so the sender can contact this prospect. Use only the DATA below: LinkedIn profile, company page, recent posts and the email lookup result.\\n\\nRUBRIC 1: RICE MOTIVATION (deterministic keyword matrix)\\nFor each axis, count the distinct LITERAL cues (case-insensitive) found in headline, about and posts. Score = min(5, number of distinct cues).\\n- REWARD: \\\"ROI\\\", \\\"ARR\\\", \\\"MRR\\\", \\\"pipeline\\\", \\\"revenue\\\", \\\"growth %\\\", \\\"deal\\\", \\\"closed\\\", \\\"won\\\", \\\"win rate\\\", \\\"conversion\\\", \\\"uplift\\\", \\\"performance\\\", currency amounts\\n- IDEOLOGY: \\\"mission\\\", \\\"values\\\", \\\"purpose\\\", \\\"impact\\\", \\\"sustainability\\\", \\\"ethical\\\", \\\"transparency\\\", \\\"open-source\\\", \\\"community-first\\\", \\\"empowerment\\\"\\n- COERCION: \\\"competitor\\\", \\\"fall behind\\\", \\\"market shifting\\\", \\\"disrupt\\\", \\\"urgent\\\", \\\"deadline\\\", \\\"regulation\\\", \\\"compliance\\\", \\\"GDPR\\\", \\\"must adapt\\\"\\n- EGO: \\\"award\\\", \\\"winner\\\", \\\"top X\\\", \\\"featured\\\", \\\"thought leader\\\", \\\"speaker\\\", \\\"keynote\\\", \\\"recognized\\\", \\\"expert\\\", grandiose headline words (\\\"transforming\\\", \\\"revolutionizing\\\")\\nDOMINANT = the axis with the highest score. Tie: Reward > Ego > Coercion > Ideology (most actionable first).\\nEach reason quotes 1 or 2 phrases from the profile or posts: \\\"Score X because: '[quote 1]', '[quote 2]'.\\\" Score 0: \\\"No signal detected.\\\"\\n\\nRUBRIC 2: DISC STYLE (behavioral cue matrix)\\nCount the cues for each style. PRIMARY = the style with the most cues (at least 3). SECONDARY = the second one (at least 2). Tie: D > C > I > S.\\n- Red (D, dominance): action verbs in the headline (drive, lead, win, execute, scale, build, ship), short sentences, 0 or 1 emoji, \\\"results\\\", \\\"outcomes\\\", short tenures\\n- Blue (C, conscientiousness): precise numbers, cited research, named frameworks (RICE, OKR, North Star, PLG), step-by-step posts, long structured about section, long tenures\\n- Yellow (I, influence): many emojis, exclamation marks, storytelling (\\\"Last week, I...\\\"), \\\"amazing\\\", \\\"love\\\", \\\"incredible\\\", team and event photos, frequent posting\\n- Green (S, steadiness): \\\"team\\\", \\\"we\\\", \\\"together\\\", \\\"thank you\\\", \\\"grateful\\\", \\\"kudos to\\\", 5+ years at the same company, calm tone, credit given to others\\nANALYSIS = 2 or 3 sentences with the cues counted and one quote, ending with \\\"To confirm in conversation.\\\"\\n\\nRUBRIC 3: APPROACH (DISC x RICE matrix, 16 cells). Pick the cell for DISC primary x RICE dominant:\\nRed x Reward: \\\"Direct ROI pitch: one number, one deadline, one closed question\\\"\\nRed x Ideology: \\\"Concrete cause and measurable impact within 60 days\\\"\\nRed x Coercion: \\\"Quantified competitive gap and an immediate next step\\\"\\nRed x Ego: \\\"Recognize their leadership and invite them to a strategic-only conversation\\\"\\nBlue x Reward: \\\"Benchmark with numbers and a 3-axis ROI calculation\\\"\\nBlue x Ideology: \\\"Method aligned with their values, consistent framework\\\"\\nBlue x Coercion: \\\"Trend data, quantified risk and scenarios\\\"\\nBlue x Ego: \\\"Research-backed proof and credible numbers\\\"\\nYellow x Reward: \\\"Customer story, the emotion of the win, a visual case study\\\"\\nYellow x Ideology: \\\"Mission story and emotional connection\\\"\\nYellow x Coercion: \\\"Community FOMO and an invitation to an event\\\"\\nYellow x Ego: \\\"Warm personal compliment and public visibility\\\"\\nGreen x Reward: \\\"Similar customer story and long-term peace of mind\\\"\\nGreen x Ideology: \\\"Shared values and a gradual, safe decision\\\"\\nGreen x Coercion: \\\"Protect the team, smooth transition, no pressure\\\"\\nGreen x Ego: \\\"Discreet recognition and credit to the whole team\\\"\\nTAG = the exact text of the chosen cell.\\nSTEPS (3, fixed labels):\\n- FOUNDATION: quote one sentence of their mission or about section\\n- ALIGNMENT: one value shared by the sender and the prospect, based on the dominant RICE axis\\n- OPEN QUESTION: one concrete question without any pitch, adapted to the DISC primary\\nPITFALLS (3, adapted to the DISC primary):\\n- Red: do not beat around the bush, no emoji, no \\\"hope you're well\\\"\\n- Blue: no claim without a number, no buzzword, no fake urgency\\n- Yellow: no technical jargon, no dense table, no dry tone\\n- Green: no pressure, no direct close, no \\\"limited time\\\"\\n\\nRUBRIC 4: SCORE, TIER, PRIORITY\\nA. TITLE FIT (max 40): 40 CRO, VP Sales, Head of Sales, Chief Revenue Officer, Director of Sales. 30 SDR, BDR or outbound manager. 25 RevOps, Revenue Operations, Sales Ops manager. 20 CEO or founder of a company under 50 employees without a sales leader. 0 otherwise.\\nB. COMPANY STAGE from employeeCount (max 30): 30 for 51-200, 25 for 11-50, 15 for 5-10, 5 for 201-500, 0 otherwise.\\nC. INTENT SIGNALS (max 20): +5 per post from the last 3 months about outbound, sales playbooks, RevOps, scaling, hiring SDR/BDR/AE, AI in sales, automation, multichannel prospecting or sales engagement tools (max 4 posts).\\nD. PERSONALIZATION MATERIAL (max 10): 10 if about > 200 characters, more than 5 posts and more than 3 jobs. 5 if average. 0 if no about section or no posts.\\nSCORE = A + B + C + D (integer, max 100).\\nTIER from company size, not from the title: \\\"T1 Founding Builder\\\" (under 11 employees), \\\"T2 Optimizer\\\" (11-50), \\\"T3 Scaling\\\" (51 and more).\\nPRIORITY: \\\"🔥 HIGH\\\" (score >= 75), \\\"🟡 MEDIUM\\\" (50 to 74), \\\"🟢 LOW\\\" (under 50).\\n\\nFIRST EMAIL DRAFT\\n- Written in the prospect's language, informal register, 60 to 100 words.\\n- Hook taken from the data, short pitch, one low-friction call to action (\\\"2 minutes\\\").\\n- No em dash or en dash, straight apostrophes only.\\n- NEVER invent an amount, revenue, ARR or result.\\n- Signature: <SENDER_NAME> and <SENDER_LINKEDIN_URL>.\\n\\nOUTPUT: STRICT JSON (all keys present, no markdown, no backticks, no text before or after)\\n{\\n  \\\"rice\\\": {\\n    \\\"ideology\\\": {\\\"score\\\": 0-5, \\\"dominant\\\": bool, \\\"reason\\\": \\\"Score X because: ...\\\"},\\n    \\\"ego\\\": {\\\"score\\\": 0-5, \\\"dominant\\\": bool, \\\"reason\\\": \\\"...\\\"},\\n    \\\"coercion\\\": {\\\"score\\\": 0-5, \\\"dominant\\\": bool, \\\"reason\\\": \\\"...\\\"},\\n    \\\"reward\\\": {\\\"score\\\": 0-5, \\\"dominant\\\": bool, \\\"reason\\\": \\\"...\\\"},\\n    \\\"rice_cues\\\": {\\\"reward_kw\\\": [\\\"...\\\"], \\\"ideology_kw\\\": [\\\"...\\\"], \\\"coercion_kw\\\": [\\\"...\\\"], \\\"ego_kw\\\": [\\\"...\\\"]},\\n    \\\"angle_recommande\\\": \\\"<recommended angle, 1 or 2 sentences>\\\",\\n    \\\"a_eviter\\\": \\\"<what to avoid, 1 or 2 sentences>\\\"\\n  },\\n  \\\"disc\\\": {\\n    \\\"primary\\\": \\\"Red|Blue|Yellow|Green\\\",\\n    \\\"primary_letter\\\": \\\"D|C|I|S\\\",\\n    \\\"secondary\\\": \\\"Red|Blue|Yellow|Green|null\\\",\\n    \\\"secondary_letter\\\": \\\"D|C|I|S|null\\\",\\n    \\\"analysis\\\": \\\"Style X (N cues): [cue 1], [cue 2]. Quote: '...'. To confirm in conversation.\\\",\\n    \\\"approach\\\": \\\"<1 or 2 sentences>\\\",\\n    \\\"disc_cues\\\": {\\\"red_count\\\": N, \\\"blue_count\\\": N, \\\"yellow_count\\\": N, \\\"green_count\\\": N}\\n  },\\n  \\\"doors\\\": [{\\\"emoji\\\": \\\"<emoji>\\\", \\\"title\\\": \\\"<short topic>\\\", \\\"desc\\\": \\\"<1 sentence + quote>\\\"}],\\n  \\\"approach_plan\\\": {\\n    \\\"tag\\\": \\\"<exact matrix cell>\\\",\\n    \\\"steps\\\": [{\\\"label\\\": \\\"FOUNDATION\\\", \\\"text\\\": \\\"...\\\"}, {\\\"label\\\": \\\"ALIGNMENT\\\", \\\"text\\\": \\\"...\\\"}, {\\\"label\\\": \\\"OPEN QUESTION\\\", \\\"text\\\": \\\"...\\\"}],\\n    \\\"pieges\\\": [\\\"<pitfall 1>\\\", \\\"<pitfall 2>\\\", \\\"<pitfall 3>\\\"]\\n  },\\n  \\\"email\\\": {\\\"objet\\\": \\\"<subject, 6 to 8 words>\\\", \\\"body\\\": \\\"<60 to 100 words>\\\"},\\n  \\\"score_breakdown\\\": {\\\"title_pts\\\": N, \\\"stage_pts\\\": N, \\\"intent_pts\\\": N, \\\"personalization_pts\\\": N},\\n  \\\"rice_dominant\\\": \\\"Reward|Ideology|Coercion|Ego\\\",\\n  \\\"disc_profile\\\": \\\"🔴 Red (D)|🔵 Blue (C)|🟡 Yellow (I)|🟢 Green (S)\\\",\\n  \\\"score\\\": 0-100,\\n  \\\"tier\\\": \\\"T1 Founding Builder|T2 Optimizer|T3 Scaling\\\",\\n  \\\"priority\\\": \\\"🔥 HIGH|🟡 MEDIUM|🟢 LOW\\\",\\n  \\\"title_summary\\\": \\\"<role + company, one line>\\\",\\n  \\\"intent_signals\\\": \\\"<200 characters max>\\\",\\n  \\\"location\\\": \\\"<city, country>\\\"\\n}\\n\\nSTRICT RULES\\n- doors: 4 to 6 rapport openers, each with a quote from the data.\\n- Always quote the source text in rice reasons and door descriptions.\\n- The DISC analysis always says \\\"To confirm in conversation.\\\"\\n- score, tier, priority, RICE, DISC and tag come from the rubrics above, never from intuition.\\n- Fill rice_cues and disc_cues with the cues actually found, for audit.\", cache_control: { type: 'ephemeral' } }, { type: 'text', text: 'DATA:\\n' + JSON.stringify({profile: $('3. Apify — Scrape Profile').first().json, company: $('4. Apify — Scrape Company').first().json, posts: $('9.6 Posts safe').first().json._posts_safe || [], email: $('9d. Merge email result').first().json.email, provider: $('9d. Merge email result').first().json.provider}).slice(0, 15000) }] }] }) }}",
+        "options": {}
+      },
+      "id": "375e8502-49c2-587e-b347-2c36e965e474",
+      "name": "10. Generate Brief (Claude Sonnet)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2896,
+        192
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "Anthropic API (x-api-key)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.notion.com/v1/pages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Notion-Version",
+              "value": "2022-06-28"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ (() => {\n  const briefRaw = $('10. Generate Brief (Claude Sonnet)').first().json.content[0].text || '{}';\n  let b = {};\n  try { const m = briefRaw.match(/\\{[\\s\\S]*\\}/); b = m ? JSON.parse(m[0]) : {}; } catch(e) { b = {}; }\n  const profile = $('3. Apify — Scrape Profile').first().json;\n  const company = $('4. Apify — Scrape Company').first().json;\n  const merge = $('9d. Merge email result').first().json;\n  const postsAgg = $('9.6 Posts safe').first().json || {};\n\n  const rt = (text, bold, italic) => { const o = { type: 'text', text: { content: String(text || '') } }; if (bold || italic) o.annotations = { bold: !!bold, italic: !!italic }; return o; };\n  const para = (...runs) => ({ object: 'block', type: 'paragraph', paragraph: { rich_text: runs.length ? runs : [rt('')], color: 'default' } });\n  const h1 = (t) => ({ object: 'block', type: 'heading_1', heading_1: { rich_text: [rt(t)], color: 'default', is_toggleable: false } });\n  const h2 = (t) => ({ object: 'block', type: 'heading_2', heading_2: { rich_text: [rt(t)], color: 'default', is_toggleable: false } });\n  const bul = (...runs) => ({ object: 'block', type: 'bulleted_list_item', bulleted_list_item: { rich_text: runs, color: 'default' } });\n  const num = (...runs) => ({ object: 'block', type: 'numbered_list_item', numbered_list_item: { rich_text: runs, color: 'default' } });\n  const callout = (txt, emoji, color) => ({ object: 'block', type: 'callout', callout: { rich_text: [rt(txt)], icon: { type: 'emoji', emoji: emoji || '🧠' }, color: color || 'gray_background' } });\n  const quote = (txt) => ({ object: 'block', type: 'quote', quote: { rich_text: [rt(txt)], color: 'default' } });\n  const divider = () => ({ object: 'block', type: 'divider', divider: {} });\n  const bars = (n) => '■'.repeat(Math.max(0, Math.min(5, n||0))) + '□'.repeat(5 - Math.max(0, Math.min(5, n||0)));\n\n  const blocks = [];\n  blocks.push(h1('🧠 Brief enrichi par Claude'));\n  blocks.push(callout('Analyse Claude Sonnet depuis les donnees brutes Apify + posts. Email auto draft inclus.', '🧠'));\n\n  if (b.rice) {\n    blocks.push(h2('📊 RICE'));\n    const axes = [['ideology','🎯','Ideology'],['ego','🪞','Ego'],['coercion','⚠️','Coercion'],['reward','💰','Reward']];\n    for (const [k, em, lbl] of axes) {\n      const r = b.rice[k] || {};\n      const dominant = r.dominant ? ' ← DOMINANT' : '';\n      blocks.push(para(rt(em + ' ' + lbl + ' ' + bars(r.score) + ' (' + (r.score||0) + '/5)' + dominant, true)));\n      if (r.reason) blocks.push(para(rt(r.reason)));\n    }\n    if (b.rice.angle_recommande) blocks.push(para(rt('Angle recommande : ', true), rt(b.rice.angle_recommande)));\n    if (b.rice.a_eviter) blocks.push(para(rt('A eviter : ', true), rt(b.rice.a_eviter)));\n  }\n\n  if (b.disc) {\n    blocks.push(h2('🧠 DISC'));\n    const sec = b.disc.secondary ? (' + ' + b.disc.secondary + ' (' + (b.disc.secondary_letter || '?') + ') secondaire') : '';\n    blocks.push(callout((b.disc.primary || '?') + ' (' + (b.disc.primary_letter || '?') + ') dominant' + sec, '🧠'));\n    if (b.disc.analysis) blocks.push(para(rt(b.disc.analysis)));\n    if (b.disc.approach) blocks.push(para(rt('Approche : ', true), rt(b.disc.approach)));\n  }\n\n  if (Array.isArray(b.doors) && b.doors.length) {\n    blocks.push(h2('🤝 Portes d entree rapport'));\n    for (const d of b.doors) {\n      blocks.push(bul(rt((d.emoji||'•') + ' ' + (d.title||'') + ' — ', true), rt(d.desc||'')));\n    }\n  }\n\n  if (b.approach_plan) {\n    blocks.push(h2('🎯 Approach Plan'));\n    if (b.approach_plan.tag) blocks.push(callout(b.approach_plan.tag, '🎯'));\n    if (Array.isArray(b.approach_plan.steps)) {\n      for (const s of b.approach_plan.steps) {\n        blocks.push(num(rt((s.label||'') + ' — ', true), rt(s.text||'')));\n      }\n    }\n    if (Array.isArray(b.approach_plan.pieges) && b.approach_plan.pieges.length) {\n      blocks.push(para(rt('🚫 Pieges :', true)));\n      for (const p of b.approach_plan.pieges) blocks.push(bul(rt(p)));\n    }\n  }\n\n  if (b.email) {\n    blocks.push(h2('✏️ Draft Email T1'));\n    if (b.email.objet) blocks.push(callout('Objet : ' + b.email.objet, '📩'));\n    if (b.email.body) {\n      const bodyLines = String(b.email.body).split('\\n');\n      for (const ln of bodyLines) blocks.push(quote(ln));\n    }\n  }\n\n  blocks.push(divider());\n  blocks.push(h2('📜 Historique'));\n  const now = new Date().toISOString().replace('T',' ').slice(0,16);\n  blocks.push(bul(rt(now + ' — Agent : profil + company scrapes via Apify (' + (postsAgg.post_count||0) + ' posts)')));\n  blocks.push(bul(rt(now + ' — Claude Sonnet : brief enrichi (RICE: ' + (b.rice_dominant||'?') + ', DISC: ' + (b.disc_profile||'?') + ', Score: ' + (b.score||'?') + ')')));\n  if (merge.email) blocks.push(bul(rt(now + ' — Email trouve via : ' + (merge.provider||'?'))));\n\n  const properties = { Name: { title: [{ text: { content: ((profile.firstName||'') + ' ' + (profile.lastName||'')).trim() + (company.name ? ' — ' + company.name : '') } }] } };\n  if (profile.linkedinUrl) properties['LinkedIn URL'] = { url: profile.linkedinUrl.toLowerCase().replace(/\\/+$/, '') };\n  if (profile.headline) properties['Title'] = { rich_text: [{ text: { content: profile.headline.slice(0, 2000) } }] };\n  if (company.name) properties['Company'] = { rich_text: [{ text: { content: company.name } }] };\n  if (merge.email) properties['Email'] = { email: merge.email };\n  if (b.location) properties['Location'] = { rich_text: [{ text: { content: b.location } }] };\n  if (typeof b.score === 'number') properties['Score'] = { number: b.score };\n  if (b.rice_dominant) properties['RICE Dominant'] = { select: { name: b.rice_dominant } };\n  if (b.disc_profile) properties['DISC Profile'] = { select: { name: b.disc_profile } };\n  if (b.tier) properties['Tier'] = { select: { name: b.tier } };\n  if (b.priority) properties['Priority'] = { select: { name: b.priority } };\n  if (b.intent_signals) properties['Intent Signals'] = { rich_text: [{ text: { content: b.intent_signals.slice(0, 2000) } }] };\n  properties['Source'] = { select: { name: 'n8n' } };\n  properties['Status'] = { select: { name: '🧠 Sonnet enrichi' } };\n\n  return JSON.stringify({\n    parent: { database_id: 'YOUR_NOTION_LEADS_DATABASE_ID' },\n    properties: properties,\n    children: blocks.slice(0, 100)\n  });\n})() }}",
+        "options": {}
+      },
+      "id": "70ae1939-5afc-584a-8549-97415770c648",
+      "name": "11. Push — Notion Lead",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3488,
+        288
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "Notion integration (Bearer)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/contacts/batch/upsert",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ inputs: $json.inputs }) }}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "1e939fe0-b573-56cc-884b-c6edac437b76",
+      "name": "12. Push — HubSpot Contact",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4784,
+        240
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "HubSpot private app (Bearer)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $('2. Parse URL').item.json.slack_channel_id }}"
+        },
+        "text": "={{ (() => { let b = {}; try { const m = $('10. Generate Brief (Claude Sonnet)').first().json.content[0].text.match(/\\{[\\s\\S]*\\}/); b = m ? JSON.parse(m[0]) : {}; } catch(e) { b = {}; } const profile = $('3. Apify — Scrape Profile').first().json; const company = $('4. Apify — Scrape Company').first().json; const merge = $('9d. Merge email result').first().json; let notionUrl = ''; let wasExisting = false; try { const u = $('11u.6 aggregate → 1 item').first().json; if (u && u.was_existing) { notionUrl = 'https://www.notion.so/' + String(u.page_id||'').replace(/-/g, ''); wasExisting = true; } } catch(e) {} if (!wasExisting) { try { const c = $('11. Push — Notion Lead').first().json; notionUrl = c.url || ''; } catch(e) {} } const status = wasExisting ? '🔄 *Brief mis à jour* — profil déjà connu, page Notion existante mise à jour en place.' : '✨ *Nouveau brief créé*'; const header = '✅ *Brief prêt — ' + (profile.firstName||'') + ' ' + (profile.lastName||'') + '*'; const meta = '*Company:* ' + (company.name||'') + ' (' + (company.employeeCount||'?') + ' emp)\\n*Role:* ' + (profile.headline||'') + '\\n*Email:* ' + (merge.email||'non trouvé') + ' (via ' + (merge.provider||'none') + ')\\n*Notion:* <' + notionUrl + '|Ouvrir brief complet>\\n*Score:* ' + (b.score||'?') + ' | RICE *' + (b.rice_dominant||'?') + '* | DISC ' + (b.disc_profile||'?') + ' | Tier ' + (b.tier||'?') + ' | ' + (b.priority||'?'); const doorsTop = (Array.isArray(b.doors) ? b.doors.slice(0,3).map(d => '• ' + (d.emoji||'•') + ' *' + (d.title||'') + '* — ' + (d.desc||'').slice(0, 120)).join('\\n') : ''); const angle = b.rice && b.rice.angle_recommande ? ('\\n*Angle recommandé:* ' + b.rice.angle_recommande) : ''; const emailPreview = b.email ? ('\\n\\n*✏️ Draft Email T1*\\n*Objet:* ' + (b.email.objet||'') + '\\n>>> ' + ((b.email.body||'').slice(0, 600))) : ''; return [status, '', header, meta, '', '*🤝 Top 3 portes d entrée:*', doorsTop, angle, emailPreview].join('\\n'); })() }}",
+        "otherOptions": {}
+      },
+      "id": "dc601921-e059-54db-b36b-5c26c8761ca1",
+      "name": "13. Slack — Post Brief",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        5232,
+        240
+      ],
+      "webhookId": "92de8931-9c6e-5375-ada7-228aeb8c0730",
+      "credentials": {
+        "slackApi": {
+          "id": null,
+          "name": "Slack bot"
+        }
+      },
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Collapse 44 posts into 1 item with posts as array.\n// This stops the fanout so downstream nodes (Hunter/FullEnrich/Brief/Notion/HubSpot/Slack)\n// all run ONCE per /brief call.\nconst posts = $input.all().map(x => x.json);\nreturn [{ json: { posts, post_count: posts.length } }];"
+      },
+      "id": "a4b02686-e2e4-5fe1-9560-98646925bda7",
+      "name": "8b. Aggregate Posts (44→1)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1712,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/notes",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ (() => {\n  const briefRaw = $('10. Generate Brief (Claude Sonnet)').first().json.content[0].text || '{}';\n  let b = {};\n  try { const m = briefRaw.match(/\\{[\\s\\S]*\\}/); b = m ? JSON.parse(m[0]) : {}; } catch(e) { b = {}; }\n\n  const profile = $('3. Apify — Scrape Profile').first().json;\n  const company = $('4. Apify — Scrape Company').first().json;\n  const merge = $('9d. Merge email result').first().json;\n  let notionUrl = ''; try { const u = $('11u.6 aggregate → 1 item').first().json; if (u && u.was_existing) notionUrl = 'https://www.notion.so/' + String(u.page_id||'').replace(/-/g, ''); } catch(e) {} if (!notionUrl) { try { notionUrl = $('11. Push — Notion Lead').first().json.url || ''; } catch(e) {} }\n  const contactId = $('12. Push — HubSpot Contact').first().json.results?.[0]?.id || $('12. Push — HubSpot Contact').first().json.vid || $('12. Push — HubSpot Contact').first().json.id;\n\n  const esc = (s) => String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');\n  const bars = (n) => '■'.repeat(Math.max(0,Math.min(5,n||0))) + '□'.repeat(5 - Math.max(0,Math.min(5,n||0)));\n  const lines = [];\n\n  // Header\n  lines.push('<h2>🧠 Brief enrichi par Claude Sonnet — ' + esc((profile.firstName||'') + ' ' + (profile.lastName||'')) + ' (' + esc(company.name||'') + ')</h2>');\n  lines.push('<p><strong>Score :</strong> ' + esc(b.score||'?') + ' &nbsp;|&nbsp; <strong>RICE :</strong> ' + esc(b.rice_dominant||'?') + ' &nbsp;|&nbsp; <strong>DISC :</strong> ' + esc(b.disc_profile||'?') + ' &nbsp;|&nbsp; <strong>Tier :</strong> ' + esc(b.tier||'?') + ' &nbsp;|&nbsp; <strong>Priority :</strong> ' + esc(b.priority||'?') + '</p>');\n  lines.push('<p><strong>Role :</strong> ' + esc(profile.headline||'') + '<br/><strong>Email :</strong> ' + esc(merge.email||'non trouve') + ' (via ' + esc(merge.provider||'none') + ')<br/><strong>Notion brief :</strong> <a href=\"' + esc(notionUrl) + '\">' + esc(notionUrl) + '</a></p>');\n  lines.push('<hr/>');\n\n  // RICE\n  if (b.rice) {\n    lines.push('<h3>📊 RICE</h3>');\n    const axes = [['ideology','🎯','Ideology'], ['ego','🦞','Ego'], ['coercion','⚠️','Coercion'], ['reward','💰','Reward']];\n    for (const [k, em, lbl] of axes) {\n      const r = b.rice[k] || {};\n      const dominant = r.dominant ? ' <strong>← DOMINANT</strong>' : '';\n      lines.push('<p><strong>' + em + ' ' + lbl + ' ' + bars(r.score) + ' (' + (r.score||0) + '/5)</strong>' + dominant + '<br/>' + esc(r.reason||'') + '</p>');\n    }\n    if (b.rice.angle_recommande) lines.push('<p><strong>Angle recommande :</strong> ' + esc(b.rice.angle_recommande) + '</p>');\n    if (b.rice.a_eviter) lines.push('<p><strong>A eviter :</strong> ' + esc(b.rice.a_eviter) + '</p>');\n  }\n\n  // DISC\n  if (b.disc) {\n    lines.push('<h3>🧠 DISC</h3>');\n    const sec = b.disc.secondary ? (' + ' + esc(b.disc.secondary) + ' (' + esc(b.disc.secondary_letter||'?') + ') secondaire') : '';\n    lines.push('<p><strong>' + esc(b.disc.primary||'?') + ' (' + esc(b.disc.primary_letter||'?') + ') dominant' + sec + '</strong></p>');\n    if (b.disc.analysis) lines.push('<p>' + esc(b.disc.analysis) + '</p>');\n    if (b.disc.approach) lines.push('<p><strong>Approche :</strong> ' + esc(b.disc.approach) + '</p>');\n  }\n\n  // Doors\n  if (Array.isArray(b.doors) && b.doors.length) {\n    lines.push('<h3>🤝 Portes d entree rapport</h3>');\n    lines.push('<ul>');\n    for (const d of b.doors) {\n      lines.push('<li>' + (d.emoji||'•') + ' <strong>' + esc(d.title||'') + '</strong> — ' + esc(d.desc||'') + '</li>');\n    }\n    lines.push('</ul>');\n  }\n\n  // Approach Plan\n  if (b.approach_plan) {\n    lines.push('<h3>🎯 Approach Plan</h3>');\n    if (b.approach_plan.tag) lines.push('<p><em>' + esc(b.approach_plan.tag) + '</em></p>');\n    if (Array.isArray(b.approach_plan.steps)) {\n      lines.push('<ol>');\n      for (const s of b.approach_plan.steps) {\n        lines.push('<li><strong>' + esc(s.label||'') + '</strong> — ' + esc(s.text||'') + '</li>');\n      }\n      lines.push('</ol>');\n    }\n    if (Array.isArray(b.approach_plan.pieges) && b.approach_plan.pieges.length) {\n      lines.push('<p><strong>🚫 Pieges :</strong></p><ul>');\n      for (const p of b.approach_plan.pieges) lines.push('<li>' + esc(p) + '</li>');\n      lines.push('</ul>');\n    }\n  }\n\n  // Email T1\n  if (b.email) {\n    lines.push('<h3>✏️ Draft Email T1</h3>');\n    if (b.email.objet) lines.push('<p><strong>Objet :</strong> ' + esc(b.email.objet) + '</p>');\n    if (b.email.body) {\n      lines.push('<blockquote>' + esc(b.email.body).replace(/\\n/g, '<br/>') + '</blockquote>');\n    }\n  }\n\n  lines.push('<hr/><p><small>Brief auto-genere par Flow 1 n8n. Sources : profil + company Apify, ' + (($('9.6 Posts safe').first().json.post_count) || 0) + ' posts, brief Claude Sonnet 4.6.</small></p>');\n\n  const noteBody = lines.join('\\n');\n\n  return JSON.stringify({\n    properties: {\n      hs_note_body: noteBody.slice(0, 65000),\n      hs_timestamp: new Date().toISOString()\n    },\n    associations: [{\n      to: { id: String(contactId) },\n      types: [{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: 202 }]\n    }]\n  });\n})() }}",
+        "options": {}
+      },
+      "id": "81ec9f25-4f30-55b1-a69c-82ff7fc3f2cf",
+      "name": "12b. HubSpot — Create Note",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5008,
+        240
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "HubSpot private app (Bearer)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.notion.com/v1/databases/YOUR_NOTION_LEADS_DATABASE_ID/query",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Notion-Version",
+              "value": "2022-06-28"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ filter: { property: 'LinkedIn URL', url: { equals: (($('3. Apify — Scrape Profile').first().json.linkedinUrl || '').toLowerCase().replace(/\\/+$/, '')) } }, page_size: 100 }) }}",
+        "options": {}
+      },
+      "id": "8515019e-dffa-5dca-88ea-f27252bf7891",
+      "name": "11.a Notion — Search Lead by LinkedIn URL",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3104,
+        192
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "Notion integration (Bearer)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "found",
+              "leftValue": "={{ ($json.results && $json.results[0] && $json.results[0].id) ? true : false }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "66aaf164-d2b3-50d5-b7c7-1b3b828bea44",
+      "name": "11.b IF Lead exists",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        3328,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\n  const briefRaw = $('10. Generate Brief (Claude Sonnet)').first().json.content[0].text || '{}';\n  let b = {};\n  try { const m = briefRaw.match(/\\{[\\s\\S]*\\}/); b = m ? JSON.parse(m[0]) : {}; } catch(e) { b = {}; }\n  const profile = $('3. Apify — Scrape Profile').first().json;\n  const company = $('4. Apify — Scrape Company').first().json;\n  const merge = $('9d. Merge email result').first().json;\n  const postsAgg = $('9.6 Posts safe').first().json || {};\n  const results = $('11.a Notion — Search Lead by LinkedIn URL').first().json.results || [];\n  if (!results.length) {\n    return [{ json: { error: 'No existing page found in 11.a' } }];\n  }\n  const page_id = results[0].id;\n  const dupe_ids = results.slice(1).map(r => r.id);\n\n  const rt = (text, bold, italic) => { const o = { type: 'text', text: { content: String(text || '') } }; if (bold || italic) o.annotations = { bold: !!bold, italic: !!italic }; return o; };\n  const para = (...runs) => ({ object: 'block', type: 'paragraph', paragraph: { rich_text: runs.length ? runs : [rt('')], color: 'default' } });\n  const h1 = (t) => ({ object: 'block', type: 'heading_1', heading_1: { rich_text: [rt(t)], color: 'default', is_toggleable: false } });\n  const h2 = (t) => ({ object: 'block', type: 'heading_2', heading_2: { rich_text: [rt(t)], color: 'default', is_toggleable: false } });\n  const bul = (...runs) => ({ object: 'block', type: 'bulleted_list_item', bulleted_list_item: { rich_text: runs, color: 'default' } });\n  const num = (...runs) => ({ object: 'block', type: 'numbered_list_item', numbered_list_item: { rich_text: runs, color: 'default' } });\n  const callout = (txt, emoji, color) => ({ object: 'block', type: 'callout', callout: { rich_text: [rt(txt)], icon: { type: 'emoji', emoji: emoji || '🧠' }, color: color || 'gray_background' } });\n  const quote = (txt) => ({ object: 'block', type: 'quote', quote: { rich_text: [rt(txt)], color: 'default' } });\n  const divider = () => ({ object: 'block', type: 'divider', divider: {} });\n  const bars = (n) => '■'.repeat(Math.max(0, Math.min(5, n||0))) + '□'.repeat(5 - Math.max(0, Math.min(5, n||0)));\n\n  const blocks = [];\n  blocks.push(h1('🧠 Brief enrichi par Claude'));\n  blocks.push(callout('Analyse Claude Sonnet depuis les donnees brutes Apify + posts. Email auto draft inclus.', '🧠'));\n\n  if (b.rice) {\n    blocks.push(h2('📊 RICE'));\n    const axes = [['ideology','🎯','Ideology'],['ego','🪞','Ego'],['coercion','⚠️','Coercion'],['reward','💰','Reward']];\n    for (const [k, em, lbl] of axes) {\n      const r = b.rice[k] || {};\n      const dominant = r.dominant ? ' ← DOMINANT' : '';\n      blocks.push(para(rt(em + ' ' + lbl + ' ' + bars(r.score) + ' (' + (r.score||0) + '/5)' + dominant, true)));\n      if (r.reason) blocks.push(para(rt(r.reason)));\n    }\n    if (b.rice.angle_recommande) blocks.push(para(rt('Angle recommande : ', true), rt(b.rice.angle_recommande)));\n    if (b.rice.a_eviter) blocks.push(para(rt('A eviter : ', true), rt(b.rice.a_eviter)));\n  }\n\n  if (b.disc) {\n    blocks.push(h2('🧠 DISC'));\n    const sec = b.disc.secondary ? (' + ' + b.disc.secondary + ' (' + (b.disc.secondary_letter || '?') + ') secondaire') : '';\n    blocks.push(callout((b.disc.primary || '?') + ' (' + (b.disc.primary_letter || '?') + ') dominant' + sec, '🧠'));\n    if (b.disc.analysis) blocks.push(para(rt(b.disc.analysis)));\n    if (b.disc.approach) blocks.push(para(rt('Approche : ', true), rt(b.disc.approach)));\n  }\n\n  if (Array.isArray(b.doors) && b.doors.length) {\n    blocks.push(h2('🤝 Portes d entree rapport'));\n    for (const d of b.doors) {\n      blocks.push(bul(rt((d.emoji||'•') + ' ' + (d.title||'') + ' — ', true), rt(d.desc||'')));\n    }\n  }\n\n  if (b.approach_plan) {\n    blocks.push(h2('🎯 Approach Plan'));\n    if (b.approach_plan.tag) blocks.push(callout(b.approach_plan.tag, '🎯'));\n    if (Array.isArray(b.approach_plan.steps)) {\n      for (const s of b.approach_plan.steps) {\n        blocks.push(num(rt((s.label||'') + ' — ', true), rt(s.text||'')));\n      }\n    }\n    if (Array.isArray(b.approach_plan.pieges) && b.approach_plan.pieges.length) {\n      blocks.push(para(rt('🚫 Pieges :', true)));\n      for (const p of b.approach_plan.pieges) blocks.push(bul(rt(p)));\n    }\n  }\n\n  if (b.email) {\n    blocks.push(h2('✏️ Draft Email T1'));\n    if (b.email.objet) blocks.push(callout('Objet : ' + b.email.objet, '📩'));\n    if (b.email.body) {\n      const bodyLines = String(b.email.body).split('\\n');\n      for (const ln of bodyLines) blocks.push(quote(ln));\n    }\n  }\n\n  blocks.push(divider());\n  blocks.push(h2('📜 Historique'));\n  const now = new Date().toISOString().replace('T',' ').slice(0,16);\n  blocks.push(bul(rt(now + ' — Agent : profil + company scrapes via Apify (' + (postsAgg.post_count||0) + ' posts)')));\n  blocks.push(bul(rt(now + ' — Claude Sonnet : brief enrichi (RICE: ' + (b.rice_dominant||'?') + ', DISC: ' + (b.disc_profile||'?') + ', Score: ' + (b.score||'?') + ')')));\n  if (merge.email) blocks.push(bul(rt(now + ' — Email trouve via : ' + (merge.provider||'?'))));\n\n  const properties = { Name: { title: [{ text: { content: ((profile.firstName||'') + ' ' + (profile.lastName||'')).trim() + (company.name ? ' — ' + company.name : '') } }] } };\n  if (profile.linkedinUrl) properties['LinkedIn URL'] = { url: profile.linkedinUrl.toLowerCase().replace(/\\/+$/, '') };\n  if (profile.headline) properties['Title'] = { rich_text: [{ text: { content: profile.headline.slice(0, 2000) } }] };\n  if (company.name) properties['Company'] = { rich_text: [{ text: { content: company.name } }] };\n  if (merge.email) properties['Email'] = { email: merge.email };\n  if (b.location) properties['Location'] = { rich_text: [{ text: { content: b.location } }] };\n  if (typeof b.score === 'number') properties['Score'] = { number: b.score };\n  if (b.rice_dominant) properties['RICE Dominant'] = { select: { name: b.rice_dominant } };\n  if (b.disc_profile) properties['DISC Profile'] = { select: { name: b.disc_profile } };\n  if (b.tier) properties['Tier'] = { select: { name: b.tier } };\n  if (b.priority) properties['Priority'] = { select: { name: b.priority } };\n  if (b.intent_signals) properties['Intent Signals'] = { rich_text: [{ text: { content: b.intent_signals.slice(0, 2000) } }] };\n  properties['Source'] = { select: { name: 'n8n' } };\n  properties['Status'] = { select: { name: '🧠 Sonnet enrichi' } };\n\n  return [{ json: { page_id, dupe_ids, properties, blocks: blocks.slice(0, 100), was_existing: true } }];\n"
+      },
+      "id": "6105f40b-35bc-57dd-aa97-5641b0c78dc7",
+      "name": "11u.1 prep update payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3488,
+        16
+      ]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://api.notion.com/v1/pages/{{ $json.page_id }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Notion-Version",
+              "value": "2022-06-28"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ archived: false, icon: { type: 'emoji', emoji: '🧠' }, properties: $json.properties }) }}",
+        "options": {}
+      },
+      "id": "019c5af3-7006-5162-8af8-040e2a75d9cc",
+      "name": "11u.2 PATCH page (props + icon)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3680,
+        16
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "Notion integration (Bearer)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "=https://api.notion.com/v1/blocks/{{ $('11u.1 prep update payload').first().json.page_id }}/children?page_size=100",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Notion-Version",
+              "value": "2022-06-28"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a1b0e9d5-2a56-5cc3-89d3-7cca5bf436a9",
+      "name": "11u.3 GET existing children",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3856,
+        16
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "Notion integration (Bearer)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst items = $('11u.3 GET existing children').first().json.results || [];\nreturn items.map(blk => ({ json: { id: blk.id } }));\n"
+      },
+      "id": "89af8abc-c3dd-502b-b145-b2e998746fc8",
+      "name": "11u.4 split children → items",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4032,
+        16
+      ]
+    },
+    {
+      "parameters": {
+        "method": "DELETE",
+        "url": "=https://api.notion.com/v1/blocks/{{ $json.id }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Notion-Version",
+              "value": "2022-06-28"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "7bcc54dd-445c-50aa-9d22-270cd969965c",
+      "name": "11u.5 DELETE each block",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4208,
+        16
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "Notion integration (Bearer)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "\n// Wait for all DELETEs to finish, then emit ONE item with new blocks for next PATCH.\nconst prep = $('11u.1 prep update payload').first().json;\nreturn [{ json: { page_id: prep.page_id, blocks: prep.blocks, was_existing: true } }];\n"
+      },
+      "id": "6eec06ff-2da3-5f97-a17f-b88939ae1f4b",
+      "name": "11u.6 aggregate → 1 item",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4400,
+        16
+      ]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://api.notion.com/v1/blocks/{{ $json.page_id }}/children",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Notion-Version",
+              "value": "2022-06-28"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ children: $json.blocks }) }}",
+        "options": {}
+      },
+      "id": "822856e8-079c-5046-9d71-6374639e168f",
+      "name": "11u.7 PATCH new children (append)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4576,
+        16
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "Notion integration (Bearer)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_SLACK_CHANNEL_ID_MONITORING"
+        },
+        "text": "={{ (() => { const wb = $('1. Webhook /brief').first().json.body || {}; const name = wb.persona_name || '?'; const title = (wb.persona_title || '').slice(0, 80); const company = wb.persona_company || '?'; const score = wb.flow2_score || '?'; const tier = wb.flow2_tier || ''; return '✅ *Brief créé*\\n*' + name + '*\\n_' + title + '_\\n*Company:* ' + company + '\\n*Flow 2 score:* ' + score + (tier ? ' (' + tier + ')' : ''); })() }}",
+        "otherOptions": {}
+      },
+      "id": "9af13678-379a-5f21-81f6-7e3156643ea4",
+      "name": "M4. Slack — Brief créé",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        1900,
+        -400
+      ],
+      "webhookId": "925a6aed-2d39-5591-88bb-9fa7b363c619",
+      "credentials": {
+        "slackApi": {
+          "id": null,
+          "name": "Slack bot"
+        }
+      },
+      "executeOnce": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_SLACK_CHANNEL_ID_MONITORING"
+        },
+        "text": "={{ '❌ *Flow 1 — Persona DISQUALIFIÉ (no email)*\\n*Profile:* ' + ($('3. Apify — Scrape Profile').first().json.firstName || '?') + ' ' + ($('3. Apify — Scrape Profile').first().json.lastName || '?') + '\\n*Company:* ' + ($('4. Apify — Scrape Company').first().json.name || '?') + '\\n*URL:* ' + ($('1. Webhook /brief').first().json.body?.url || '?') + '\\n_Email enrichment failed (Hunter + FullEnrich + Lusha + Surfe tous vides). HS Contact non créé. Règle : jamais créer un contact HubSpot sans email + tam_linkedin_url._' }}",
+        "otherOptions": {}
+      },
+      "id": "5dba935e-5715-570a-b84f-23d0c4b436e5",
+      "name": "M_email_guard Slack",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        1900,
+        -50
+      ],
+      "webhookId": "b2ce6e7b-e4a3-5726-88f7-1365febd18ec",
+      "credentials": {
+        "slackApi": {
+          "id": null,
+          "name": "Slack bot"
+        }
+      },
+      "executeOnce": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "has-email",
+              "leftValue": "={{ ($('9d. Merge email result').first().json.email || '').trim().length > 0 }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "32205d29-5785-5cb1-acf3-3a79edb78dc5",
+      "name": "11.5 IF email present",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1700,
+        -200
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "fe-has-email",
+              "leftValue": "={{ $json.datas?.[0]?.contact?.emails?.[0]?.email || $json.datas?.[0]?.email || '' }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "480907ac-8d71-5690-8ddc-d7e39c9d1675",
+      "name": "9c-IF FullEnrich found?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2672,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.lusha.com/v2/person",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"contacts\": [{\n    \"contactId\": \"1\",\n    \"linkedinUrl\": \"{{ $('3. Apify — Scrape Profile').item.json.linkedinUrl }}\"\n  }]\n}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "66afe6da-d90f-5aa1-a170-580437d9e488",
+      "name": "9e. Enrich — Lusha",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2896,
+        400
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "Lusha (api_key header)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "lusha-has-email",
+              "leftValue": "={{ $json.contacts?.['1']?.data?.emailAddresses?.[0]?.email || '' }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a24c5d5a-bb9d-5605-9e1f-3c2d481d2fb7",
+      "name": "9e-IF Lusha found?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3120,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.surfe.com/v2/people/enrich",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"include\": { \"email\": true, \"mobile\": false, \"linkedInUrl\": false, \"jobHistory\": false },\n  \"people\": [{\n    \"firstName\": \"{{ $('3. Apify — Scrape Profile').item.json.firstName }}\",\n    \"lastName\": \"{{ $('3. Apify — Scrape Profile').item.json.lastName }}\",\n    \"companyName\": \"{{ $('4. Apify — Scrape Company').item.json.name }}\",\n    \"companyDomain\": \"{{ String($('4. Apify — Scrape Company').item.json.website || '').split('://').pop().split('/')[0].replace('www.', '') }}\",\n    \"linkedInUrl\": \"{{ $('3. Apify — Scrape Profile').item.json.linkedinUrl }}\",\n    \"externalID\": \"1\"\n  }]\n}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "fa5f91eb-dd3a-51cf-ba21-917087445885",
+      "name": "9f. Enrich — Surfe (POST)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3344,
+        500
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "Surfe (Bearer)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "amount": 8,
+        "unit": "seconds"
+      },
+      "id": "2cdc532b-9a06-540b-9c5e-69963ab634e7",
+      "name": "9f-Wait Surfe 8s",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        3568,
+        500
+      ],
+      "webhookId": "70d08ea8-120b-5c2a-87f4-315f7a0cdc69"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.surfe.com/v2/people/enrich/{{ $('9f. Enrich — Surfe (POST)').first().json.enrichmentID || $('9f. Enrich — Surfe (POST)').first().json.enrichmentId || $('9f. Enrich — Surfe (POST)').first().json.id || '' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "dcfadaad-d988-543a-81df-4471cda6ef19",
+      "name": "9f. Enrich — Surfe (GET)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3792,
+        500
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "Surfe (Bearer)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.notion.com/v1/pages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Notion-Version",
+              "value": "2022-06-28"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  parent: { database_id: 'YOUR_NOTION_RUN_LOG_DATABASE_ID' },\n  properties: {\n    'Run': { title: [{ text: { content: '❌ Email guard — ' + (($('3. Apify — Scrape Profile').first().json.firstName || '?') + ' ' + ($('3. Apify — Scrape Profile').first().json.lastName || '?')) + ' @ ' + ($('4. Apify — Scrape Company').first().json.name || '?') } }] },\n    'Run ID': { rich_text: [{ text: { content: $('1. Webhook /brief').first().json.body?.url || '' } }] },\n    'Statut': { select: { name: '❌ NO-GO' } },\n    'Items évalués': { number: 1 },\n    'Type': { select: { name: 'Persona scoring' } },\n    'Workflow source': { select: { name: 'Flow 1 — Brief Pipeline' } },\n    'Date run': { date: { start: new Date().toISOString() } },\n    'Tags': { multi_select: [{ name: 'bug_pipeline' }] },\n    'Commentaire': { rich_text: [{ text: { content: 'Email enrichment échoué — Hunter + FullEnrich + Lusha + Surfe tous vides. HS Contact non créé (règle : jamais sans email + linkedin_url). Persona DISQUALIFIÉ.' } }] }\n  }\n}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "0e59b758-bf18-5660-865a-9f9f25aac9f3",
+      "name": "M_email_guard Notion log",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2120,
+        -50
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "Notion integration (Bearer)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const profile = $('3. Apify — Scrape Profile').first().json || {};\nconst company = $('4. Apify — Scrape Company').first().json || {};\nconst merge = $('9d. Merge email result').first().json || {};\nconst body = $('1. Webhook /brief').first().json?.body || {};\nlet b = {};\ntry {\n  const briefRaw = $('10. Generate Brief (Claude Sonnet)').first().json.content[0].text || '{}';\n  const m = briefRaw.match(/\\{[\\s\\S]*\\}/);\n  b = m ? JSON.parse(m[0]) : {};\n} catch(e) { b = {}; }\n\nconst cp = (profile.currentPosition && profile.currentPosition[0]) || {};\nconst loc = profile.location || {};\nconst parsed = loc.parsed || {};\nconst city = parsed.city || loc.city || '';\nconst country = parsed.country || parsed.countryFull || loc.country || '';\n\nfunction getJobTitle() {\n  const positions = profile.currentPosition || [];\n  const targetCo = (body.persona_company || company.name || '').toLowerCase().trim();\n  if (targetCo && positions.length) {\n    const norm = (s) => (s || '').toLowerCase().trim().replace(/\\s+/g, ' ');\n    const match = positions.find(p => {\n      const pco = norm(p.companyName || p.company);\n      return pco && (pco.includes(norm(targetCo)) || norm(targetCo).includes(pco));\n    });\n    if (match) return match.position || match.title || '';\n  }\n  if (positions[0]) return positions[0].position || positions[0].title || '';\n  return body.persona_title || '';\n}\n\nconst jobtitle = getJobTitle();\n\nfunction cleanJobtitle(t) {\n  if (!t) return '';\n  const GEOS = ['International','Worldwide','Global','EMEA','APAC','LATAM','Europe','France','UK','US','USA','Spain','Germany','Italy','Benelux','North America','South America','Asia','MENA','DACH','Nordics','Enterprise Segment','Enterprise'];\n  t = t.split(/\\s*[@|]\\s*/, 1)[0].trim();\n  // V2: include regular hyphen (with spaces around) — strips \"- On recrute !\" etc.\n  t = t.split(/\\s+[-–—]\\s+/, 1)[0].trim();\n  t = t.replace(/\\s*\\([^)]*\\)/g, '').trim();\n  t = t.replace(/^(Co[- ]?Founder|Founder|Co[- ]?Fondateur|Fondateur|Co[- ]?fondatrice|Fondatrice)\\s*[&,/]\\s*/i, '').trim();\n  if (/(Sales|Revenue|RevOps|GTM|CRO|CSO|VP|Director|Head|Chief|Manager|Founder|CEO|Commercial|Directeur|Directrice|Vente|Responsable|Fondateur)/i.test(t)) {\n    t = t.split(/\\s*[&\\/,]\\s+/, 1)[0].trim();\n  }\n  const geoLeading = new RegExp('^(?:' + GEOS.join('|') + ')\\\\s+', 'i');\n  t = t.replace(geoLeading, '').trim();\n  const geoTrailing = new RegExp('\\\\s+(?:' + GEOS.join('|') + ')$', 'i');\n  t = t.replace(geoTrailing, '').trim().replace(geoTrailing, '').trim();\n  t = t.replace(/Vice[- ]?President(?:\\s+of)?/gi, 'VP of');\n  t = t.replace(/VP\\s+of\\s+of\\s+/gi, 'VP of ');\n  t = t.replace(/Vice[- ]?Président(?:e)?(?:\\s+(?:du|de la|de))?/gi, 'VP');\n  // V2: normalize \"VP Sales\" → \"VP of Sales\" when \"of\" is missing\n  t = t.replace(/^VP\\s+(?!of\\s)([A-Z])/, 'VP of $1');\n  t = t.replace(/^[\\s\\-–—,;:]+|[\\s\\-–—,;:]+$/g, '');\n  t = t.replace(/\\s+/g, ' ').trim();\n  return t;\n}\n\nconst tier = body.flow2_tier || '';\nlet job_title_lemlist = '';\nif (tier !== '4_ceo_fallback') {\n  job_title_lemlist = cleanJobtitle(jobtitle) || jobtitle;\n}\n\nlet ricePreview = '';\nif (b.rice) {\n  const r = b.rice;\n  ricePreview = 'R:' + (r.reward?.score ?? '?') + ' I:' + (r.ideology?.score ?? '?') + ' C:' + (r.coercion?.score ?? '?') + ' E:' + (r.ego?.score ?? '?') + ' | Score:' + (b.score ?? '?') + ' | Dom:' + (b.rice_dominant || '?') + ' | DISC:' + (b.disc_profile || '?') + ' | Tier:' + (b.tier || '?') + ' | Prio:' + (b.priority || '?');\n}\n\nconst today = new Date().toISOString().slice(0,10);\nconst url = body.url || profile.linkedinUrl || '';\n\nconst sc = body.flow2_sales_count || {};\nconst salesSummary = (sc.sdr || sc.bdr || sc.csm || sc.ae)\n  ? '[Sales team détectée chez ' + (company.name || body.persona_company || 'company') + ' sur ' + (sc.total_employees_scraped || '?') + ' employés scrapés Apify] SDR: ' + (sc.sdr || 0) + ' | BDR: ' + (sc.bdr || 0) + ' | AE: ' + (sc.ae || 0) + ' | CSM: ' + (sc.csm || 0)\n  : '[Sales team Apify scrap] aucun SDR/BDR/AE/CSM détecté dans les ' + (sc.total_employees_scraped || 0) + ' employés scrapés';\n\nconst flow2Reason = String(body.flow2_reason || '');\nconst t4Tag = body.flow2_t4_promoted ? '[T4 FALLBACK PROMOTED] ' : '';\nconst qualifiedReason = t4Tag + flow2Reason + '\\n' + salesSummary;\n\nconst props = {\n  email: merge.email || '',\n  firstname: profile.firstName || '',\n  lastname: profile.lastName || '',\n  company: company.name || body.persona_company || '',\n  jobtitle: jobtitle,\n  job_title_lemlist: job_title_lemlist,\n  city: city,\n  country: country,\n  hs_linkedin_url: url,\n  tam_linkedin_url: url,\n  score_persona: Number(body.flow2_score || 0),\n  qualified_reason: qualifiedReason,\n  disqualif_reason: '',\n  persona_tier: body.flow2_tier || '',\n  persona_status: 'qualified',\n  rice_preview: ricePreview,\n  tam_last_scrap: today,\n  outbound_status: 'not_started',\n  flow1_last_brief_date: today};\n\nreturn [{ json: { inputs: [{ idProperty: 'email', id: merge.email || '', properties: props }] } }];"
+      },
+      "id": "d11ba55c-0588-56a4-866a-888d17243146",
+      "name": "12a. Prep contact props",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4584,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/contacts/search",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ filterGroups:[{filters:[{propertyName:'tam_linkedin_url',operator:'EQ',value: $('2. Parse URL').first().json.profile_url}]}], properties:['email','firstname','lastname','flow1_last_brief_date','tam_linkedin_url'], limit:1 }) }}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "fc39c75f-b343-5437-9700-212792b30a50",
+      "name": "2.5 HS Search by LinkedIn URL",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        664,
+        300
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "HubSpot private app (Bearer)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ ($json.results && $json.results.length > 0 && $json.results[0].properties.flow1_last_brief_date) ? Math.floor((Date.now() - new Date($json.results[0].properties.flow1_last_brief_date).getTime()) / 86400000) : 999 }}",
+              "rightValue": 30,
+              "operator": {
+                "type": "number",
+                "operation": "lt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a682bb2d-1317-5018-b4f6-022908a5de54",
+      "name": "2.6 IF briefed < 30j ?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        864,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "post",
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $('2. Parse URL').first().json.slack_channel_id }}"
+        },
+        "text": "=⏭️ *Brief skip — déjà fait il y a moins de 30 jours*\\n\\nProspect : {{ $('2. Parse URL').first().json.profile_url }}\\nDernier brief : {{ $('2.5 HS Search by LinkedIn URL').first().json.results[0].properties.flow1_last_brief_date }}\\nHS Contact : https://app.hubspot.com/contacts/YOUR_HUBSPOT_PORTAL_ID/contact/{{ $('2.5 HS Search by LinkedIn URL').first().json.results[0].id }}",
+        "otherOptions": {}
+      },
+      "id": "14cf817d-d81d-5ecb-b26a-2c2bad409e70",
+      "name": "2.7 Slack — déjà briefé",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        1064,
+        200
+      ],
+      "webhookId": "a02c74a0-a1e9-527b-80f3-8335ef643435",
+      "credentials": {
+        "slackApi": {
+          "id": null,
+          "name": "Slack bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Profile resolver — forward Apify output if non-empty,\n// else build profile from Flow 2 webhook payload (encoded LinkedIn URL case).\nconst apifyOut = $input.all();\nconst body = $('1. Webhook /brief').first().json?.body || {};\nconst persona = body.persona_data || {};\n\n// Path 1 : Apify returned data (URL was a valid slug)\nif (apifyOut.length > 0 && apifyOut[0].json?.firstName) {\n  return apifyOut;\n}\n\n// Path 2 : Apify returned 0 (encoded URL or unfindable). Build fallback from webhook payload.\nif (!persona.firstName) {\n  // No fallback data either → return empty (downstream nodes will skip naturally)\n  console.log('Profile resolver : no Apify data + no persona_data in webhook → empty');\n  return [];\n}\n\nconsole.log('Profile resolver : Apify failed, using persona_data from Flow 2 webhook payload');\n\nreturn [{ json: {\n  firstName: persona.firstName,\n  lastName: persona.lastName,\n  summary: persona.summary || '',\n  headline: persona.headline || '',\n  currentPosition: persona.currentPosition || [],\n  location: persona.location || {},\n  pictureUrl: persona.pictureUrl || '',\n  linkedinUrl: persona.linkedinUrl || body.url || '',\n  // Flag for downstream nodes that may want to know this is a fallback\n  _profile_source: 'flow2_webhook_fallback',\n}}];"
+      },
+      "id": "288316a7-2d5f-5b84-b49e-a51160920c6f",
+      "name": "3. Apify — Scrape Profile",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        908,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "c-encoded",
+              "leftValue": "={{ String($('2. Parse URL').first().json.profile_slug || '').startsWith('ACw') }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "ecb2e931-9bf1-5fdc-aca1-f80ba8030fb9",
+      "name": "2.8 IF encoded URL?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        580,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "c-canpost",
+              "leftValue": "={{ !String($('2. Parse URL').first().json.profile_slug || '').startsWith('ACw') }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "4b636b6c-7889-52bf-bd77-531b90be25d6",
+      "name": "7.5 IF can scrape posts?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1450,
+        250
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Pre-compute posts safely AND emit the same shape as 8b (posts + post_count)\nlet posts = [];\ntry {\n  const ref = $('8b. Aggregate Posts (44→1)').first();\n  posts = ref?.json?.posts || [];\n} catch (e) {\n  posts = [];\n}\nconst out = $input.all().map(it => ({ json: { ...it.json, posts, post_count: posts.length, _posts_safe: posts } }));\nreturn out;"
+      },
+      "id": "e3f7541f-d684-5759-9226-af2f943cdf83",
+      "name": "9.6 Posts safe",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2800,
+        192
+      ]
+    }
+  ],
+  "connections": {
+    "1. Webhook /brief": {
+      "main": [
+        [
+          {
+            "node": "2. Parse URL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "2. Parse URL": {
+      "main": [
+        [
+          {
+            "node": "2.5 HS Search by LinkedIn URL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "4. Apify — Scrape Company": {
+      "main": [
+        [
+          {
+            "node": "7.5 IF can scrape posts?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "8. Apify — Scrape Posts": {
+      "main": [
+        [
+          {
+            "node": "8b. Aggregate Posts (44→1)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "9a. Enrich — Hunter": {
+      "main": [
+        [
+          {
+            "node": "9b. IF Hunter found?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "9b. IF Hunter found?": {
+      "main": [
+        [
+          {
+            "node": "9d. Merge email result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "9c. Enrich — FullEnrich",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "9c. Enrich — FullEnrich": {
+      "main": [
+        [
+          {
+            "node": "9c-IF FullEnrich found?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "9d. Merge email result": {
+      "main": [
+        [
+          {
+            "node": "9.6 Posts safe",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "10. Generate Brief (Claude Sonnet)": {
+      "main": [
+        [
+          {
+            "node": "11.a Notion — Search Lead by LinkedIn URL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "11. Push — Notion Lead": {
+      "main": [
+        [
+          {
+            "node": "11.5 IF email present",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "12. Push — HubSpot Contact": {
+      "main": [
+        [
+          {
+            "node": "12b. HubSpot — Create Note",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "8b. Aggregate Posts (44→1)": {
+      "main": [
+        [
+          {
+            "node": "9a. Enrich — Hunter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "12b. HubSpot — Create Note": {
+      "main": [
+        [
+          {
+            "node": "13. Slack — Post Brief",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "11.a Notion — Search Lead by LinkedIn URL": {
+      "main": [
+        [
+          {
+            "node": "11.b IF Lead exists",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "11.b IF Lead exists": {
+      "main": [
+        [
+          {
+            "node": "11u.1 prep update payload",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "11. Push — Notion Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "11u.1 prep update payload": {
+      "main": [
+        [
+          {
+            "node": "11u.2 PATCH page (props + icon)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "11u.2 PATCH page (props + icon)": {
+      "main": [
+        [
+          {
+            "node": "11u.3 GET existing children",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "11u.3 GET existing children": {
+      "main": [
+        [
+          {
+            "node": "11u.4 split children → items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "11u.4 split children → items": {
+      "main": [
+        [
+          {
+            "node": "11u.5 DELETE each block",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "11u.5 DELETE each block": {
+      "main": [
+        [
+          {
+            "node": "11u.6 aggregate → 1 item",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "11u.6 aggregate → 1 item": {
+      "main": [
+        [
+          {
+            "node": "11u.7 PATCH new children (append)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "11u.7 PATCH new children (append)": {
+      "main": [
+        [
+          {
+            "node": "11.5 IF email present",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "11.5 IF email present": {
+      "main": [
+        [
+          {
+            "node": "12a. Prep contact props",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "M_email_guard Slack",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "M_email_guard Notion log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "9c-IF FullEnrich found?": {
+      "main": [
+        [
+          {
+            "node": "9d. Merge email result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "9e. Enrich — Lusha",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "9e. Enrich — Lusha": {
+      "main": [
+        [
+          {
+            "node": "9e-IF Lusha found?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "9e-IF Lusha found?": {
+      "main": [
+        [
+          {
+            "node": "9d. Merge email result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "9f. Enrich — Surfe (POST)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "9f. Enrich — Surfe (POST)": {
+      "main": [
+        [
+          {
+            "node": "9f-Wait Surfe 8s",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "9f-Wait Surfe 8s": {
+      "main": [
+        [
+          {
+            "node": "9f. Enrich — Surfe (GET)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "9f. Enrich — Surfe (GET)": {
+      "main": [
+        [
+          {
+            "node": "9d. Merge email result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "12a. Prep contact props": {
+      "main": [
+        [
+          {
+            "node": "12. Push — HubSpot Contact",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "2.5 HS Search by LinkedIn URL": {
+      "main": [
+        [
+          {
+            "node": "2.6 IF briefed < 30j ?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "2.6 IF briefed < 30j ?": {
+      "main": [
+        [
+          {
+            "node": "2.7 Slack — déjà briefé",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "2.8 IF encoded URL?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "3a. Apify Profile (slug only)": {
+      "main": [
+        [
+          {
+            "node": "3. Apify — Scrape Profile",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "3. Apify — Scrape Profile": {
+      "main": [
+        [
+          {
+            "node": "4. Apify — Scrape Company",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "2.8 IF encoded URL?": {
+      "main": [
+        [
+          {
+            "node": "3. Apify — Scrape Profile",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "3a. Apify Profile (slug only)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "7.5 IF can scrape posts?": {
+      "main": [
+        [
+          {
+            "node": "8. Apify — Scrape Posts",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "9a. Enrich — Hunter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "9.6 Posts safe": {
+      "main": [
+        [
+          {
+            "node": "10. Generate Brief (Claude Sonnet)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  }
+}

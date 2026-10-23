@@ -1,0 +1,875 @@
+{
+  "name": "Flow 4 — Company Qualifier (HS pipeline)",
+  "nodes": [
+    {
+      "parameters": {
+        "formTitle": "Flow 4 — Company Qualifier (HS pipeline)",
+        "formDescription": "Pioche les companies tam_status=new dans HubSpot et les score via Haiku. Update tam_status=qualified|disqualified.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Batch size",
+              "placeholder": "50",
+              "requiredField": true
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "5d608767-b802-57bb-a3dc-437b62ec0b4d",
+      "name": "1. Form Trigger",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.2,
+      "position": [
+        -1872,
+        384
+      ],
+      "webhookId": "b14bb11c-c4c7-5f09-a48a-80fbec5d39e4"
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst data = $input.first().json;\nconst body = data.body || data;\n// handles both Form Trigger (key 'Batch size') and Webhook POST JSON (key 'batch_size')\nconst bs = body['batch_size'] ?? body['Batch size'] ?? 50;\nreturn [{ json: { batch_size: Number(bs), run_id: 'qual-' + Date.now() } }];\n"
+      },
+      "id": "8938ea38-cb47-53ad-ae21-a108ca8bb423",
+      "name": "1c. Normalize Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1648,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/companies/search",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ filterGroups: [{ filters: [{ propertyName: 'tam_status', operator: 'NOT_HAS_PROPERTY' }] }, { filters: [{ propertyName: 'tam_status', operator: 'EQ', value: 'new' }] }], sorts: [{ propertyName: 'tam_first_seen', direction: 'ASCENDING' }], properties: ['tam_domain', 'name', 'domain', 'website', 'numberofemployees', 'tam_industry', 'description', 'linkedin_company_page', 'tam_status', 'tam_last_scrap', 'score_icp'], limit: $('1c. Normalize Input').first().json.batch_size }) }}",
+        "options": {}
+      },
+      "id": "f16aca51-bf4f-5159-a83f-030dda07b3a0",
+      "name": "2. HS Search tam_status=new",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -832,
+        80
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "HubSpot private app (Bearer)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst r = $input.first().json.results || [];\nreturn r.map(c => ({ json: { hs_id: c.id, ...(c.properties || {}) } }));\n"
+      },
+      "id": "ff5af866-d9e6-5462-924a-53868d1ab7ec",
+      "name": "2b. Split companies → items",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -624,
+        96
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 1000, temperature: 0, messages: [{ role: 'user', content: [{ type: 'text', text: \"You are the company qualification agent of an outbound engine. Target accounts: B2B SaaS companies with 11 to 200 employees, headquartered in the target country given in INPUT.\\n\\nRULE ZERO: DO NOT INVENT RULES.\\n- The list of hard disqualifications below is closed (5 numbered items).\\n- If is_icp is false because of a disqualification, cite its number (1 to 5).\\n- If you cannot cite a number from 1 to 5, is_icp depends ONLY on score >= 50.\\n- A condition that is not listed never disqualifies. It only gives 0 or few points.\\n\\nKEY DISTINCTION: a vertical B2B SaaS is not a company that operates in that sector.\\nTest: does the company sell recurring, multi-customer software to businesses?\\n- If yes, it is B2B SaaS (40 industry points), even when its customers belong to an excluded sector.\\n- Disqualification #2 applies only to companies that operate in the sector themselves.\\nExamples that must NOT be disqualified:\\n- software for local governments = GovTech, qualified\\n- software for dental or physiotherapy practices = HealthTech, qualified\\n- software for real estate agencies = PropTech, qualified\\n- software that helps consumer brands run their marketing = B2B, qualified (not a B2C marketplace)\\n- tools for developers = DevTools, qualified\\n\\nSCORING RUBRIC\\n\\nA. INDUSTRY (max 40)\\n- 40: pure B2B SaaS, horizontal (CRM, sales and marketing tools, data, AI platforms, developer tools, infrastructure, cybersecurity) or vertical (any customer sector, as long as the model is recurring multi-customer software)\\n- 25: software or IT services company with a partial SaaS product\\n- 10: tech services with a little product\\n- 0: consulting or recruiting firm, pure agency, non-SaaS open-source ERP, pure hardware, IT services firm\\n\\nB. HQ COUNTRY (max 25). Read hq_country, hq_city, locations and description.\\n- 25: HQ in the target country\\n- 10: HQ elsewhere, with a clear presence in the target country (office, sales team, most employees)\\n- 0: no presence detected\\n\\nC. COMPANY SIZE (max 20), strict table:\\n| employees | points |\\n| 1 to 10 | 0 |\\n| 11 to 50 | 15 |\\n| 51 to 200 | 20 |\\n| 201 to 500 | 5 |\\n| 501 and more | 0 |\\n\\nD. GROWTH SIGNALS (max 15). +5 per LITERAL signal found in the description (max 3):\\n\\\"scaling sales\\\", \\\"outbound\\\", \\\"international expansion\\\", \\\"raised Series A/B/C\\\", \\\"hiring SDR/BDR/AE/CRO/VP Sales\\\", \\\"new GTM motion\\\", \\\"building sales team\\\", \\\"go-to-market\\\"\\n\\nFINAL SCORE = A + B + C + D (integer from 0 to 100)\\n\\nHARD DISQUALIFICATIONS (closed list, 5 items). If you disqualify, cite a number from 1 to 5. Otherwise do NOT disqualify.\\n#1. Pure B2C marketplace or store selling to consumers. Do not confuse it with B2B platforms that sell software to brands.\\n#2. The company itself operates in an excluded sector. Closed list: healthcare provider (hospital, clinic, lab), real estate agency, video game studio, pharmaceutical manufacturer, energy producer, pure hardware manufacturer without its own software.\\n#3. Holding company with no product of its own.\\n#4. Closed, suspended or acquired company (\\\"acquired by\\\", \\\"ceased operations\\\").\\n#5. Open-source ERP sold through integration services, without recurring SaaS licences.\\n\\nDO NOT DISQUALIFY FOR (0 points only): HQ abroad, more than 500 employees, no growth signal, \\\"software / IT services\\\" industry (25 points), a customer sector that is not listed in #2.\\n\\nSOFT SIGNAL: has_gtm_engineer = true if the description mentions \\\"GTM Engineer\\\", \\\"Sales Ops Engineer\\\", \\\"RevOps Engineer\\\" or \\\"Revenue Operations Engineer\\\".\\n\\nELIGIBILITY: is_icp = true ONLY IF score >= 50 AND no hard disqualification applies.\\n\\nOUTPUT: STRICT JSON\\n- ONE JSON block in your answer. Never two.\\n- No text before or after the JSON. No prose. No markdown.\\n- If you detect a math error, rewrite the single JSON block.\\n\\nExact format:\\n{\\\"is_icp\\\": bool, \\\"score\\\": 0-100, \\\"score_breakdown\\\": {\\\"industry_pts\\\": N, \\\"country_pts\\\": N, \\\"size_pts\\\": N, \\\"signals_pts\\\": N}, \\\"reason\\\": \\\"<industry X pts> + <country Y pts> + <size Z pts> + <signals W pts> = <total>. Disqualification: <#N or none>\\\", \\\"country_detected\\\": string, \\\"industry_match\\\": bool, \\\"size_in_range\\\": bool, \\\"is_b2b\\\": bool, \\\"has_gtm_engineer\\\": bool, \\\"is_vertical_saas_b2b\\\": bool, \\\"disqualif_number\\\": \\\"1-5 or null\\\"}\", cache_control: { type: 'ephemeral' } }, { type: 'text', text: '\\n\\nINPUT:\\n- ICP location: France\\n- size_min: 11\\n- size_max: 200\\n- company_data: ' + JSON.stringify($json).slice(0, 8000) }] }] }) }}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 250
+            }
+          },
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "id": "9d70ec86-cc00-5871-bfb7-0ad3ab167e57",
+      "name": "5. Score Company (Haiku)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -400,
+        80
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "Anthropic API (x-api-key)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "\nfunction findLastValidJson(text) {\n  if (!text) return null;\n  const blocks = []; let depth = 0, start = -1;\n  for (let i = 0; i < text.length; i++) {\n    if (text[i] === '{') { if (depth === 0) start = i; depth++; }\n    else if (text[i] === '}') { depth--; if (depth === 0 && start >= 0) { blocks.push([start, i + 1]); start = -1; } }\n  }\n  for (let i = blocks.length - 1; i >= 0; i--) {\n    try {\n      const obj = JSON.parse(text.substring(blocks[i][0], blocks[i][1]));\n      if (obj && typeof obj === 'object' && 'is_icp' in obj) return obj;\n    } catch (e) {}\n  }\n  for (let i = blocks.length - 1; i >= 0; i--) {\n    try { return JSON.parse(text.substring(blocks[i][0], blocks[i][1])); } catch (e) {}\n  }\n  return null;\n}\nfunction clamp(n, min, max) { const x = typeof n === 'number' ? n : 0; return Math.max(min, Math.min(max, x)); }\nfunction sizePtsFromCount(emp) {\n  if (!emp || emp < 1) return 0;\n  if (emp <= 10) return 0;\n  if (emp <= 50) return 15;\n  if (emp <= 200) return 20;\n  if (emp <= 500) return 5;\n  return 0;\n}\n\nconst all = $input.all();\nconst out = [];\nfor (let i = 0; i < all.length; i++) {\n  const item = all[i];\n  const t = item.json?.content?.[0]?.text || '';\n  const v = findLastValidJson(t) || {};\n  const orig = $('2b. Split companies → items').itemMatching(i)?.json || {};\n  const empCount = Number(orig.numberofemployees || 0);\n\n  const bk = v.score_breakdown || {};\n  const industry_pts = clamp(bk.industry_pts, 0, 40);\n  const country_pts = clamp(bk.country_pts, 0, 25);\n  const size_pts_haiku = clamp(bk.size_pts, 0, 20);\n  const size_pts_computed = sizePtsFromCount(empCount);\n  const size_pts = empCount > 0 ? size_pts_computed : size_pts_haiku;\n  const signals_pts = clamp(bk.signals_pts, 0, 15);\n\n  const disqNum = v.disqualif_number && /^[1-5]$/.test(String(v.disqualif_number).trim()) ? String(v.disqualif_number).trim() : null;\n  const sum = industry_pts + country_pts + size_pts + signals_pts;\n  const score = disqNum ? 0 : sum;\n  const is_icp = !disqNum && score >= 50;\n\n  // Doubt flag — extended V3.8 to catch more false positives:\n  // (a) ANY disqualif #2 or #5 (no sum threshold, since Haiku can also undervalue industry on healthcare/govtech)\n  // (b) Score 40-55 sans disqualif (close to threshold)\n  // (c) Industry undervalued (0 or 10 pts) but HQ France/EU detected + size in 11-500 range\n  //     → suspicious that valid SaaS B2B got tagged as 'consulting/IT services'\n  const _doubt = (\n    disqNum === '1' && sum >= 50 ||  // V3.9: B2C marketplace claims souvent fausses sur SaaS B2B pour brands B2C\n    disqNum === '2' ||\n    disqNum === '5' ||\n    (!disqNum && score >= 40 && score <= 55) ||\n    (industry_pts <= 10 && country_pts >= 10 && empCount >= 11 && empCount <= 500)\n  );\n\n  out.push({\n    json: {\n      ...orig,\n      _verdict: {\n        is_icp, score,\n        score_breakdown: { industry_pts, country_pts, size_pts, signals_pts },\n        reason: v.reason || '',\n        has_gtm_engineer: v.has_gtm_engineer === true,\n        disqualif_number: disqNum,\n        _doubt,\n        _audit: {\n          haiku_score: typeof v.score === 'number' ? v.score : null,\n          haiku_is_icp: v.is_icp === true,\n          haiku_breakdown: bk,\n          numberofemployees: empCount,\n          size_corrected: empCount > 0 && size_pts_haiku !== size_pts_computed,\n          breakdown_sum_no_disq: sum,\n        },\n      },\n    },\n  });\n}\nreturn out;\n"
+      },
+      "id": "659962f8-2cf6-5595-be25-abb7853e1546",
+      "name": "5.6 Parse Haiku verdict",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -176,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/companies/batch/update",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 2000
+            }
+          }
+        }
+      },
+      "id": "5dbabc2a-6e49-5339-860f-9e596b819439",
+      "name": "5.5 Update HS Company post-scoring",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1200,
+        144
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "HubSpot private app (Bearer)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "\nif ($itemIndex !== 0) return [];\nconst verdicts = $('5.95 Merge confident + reviewed').all();\nconst total = verdicts.length;\nlet qualified = 0, disqualified = 0, sonnetReviewed = 0;\nconst lines = verdicts.map(v => {\n  const j = v.json;\n  const ver = j._verdict || {};\n  if (ver.is_icp) qualified++; else disqualified++;\n  if (ver._reviewed_by === 'sonnet') sonnetReviewed++;\n  const bk = ver.score_breakdown || {};\n  const breakdownStr = (typeof bk.industry_pts === 'number')\n    ? ' [I:' + (bk.industry_pts||0) + ' C:' + (bk.country_pts||0) + ' Sz:' + (bk.size_pts||0) + ' Sg:' + (bk.signals_pts||0) + ']'\n    : '';\n  const sonnetTag = ver._reviewed_by === 'sonnet' ? ' 🤖' : '';\n  return '   - ' + (ver.is_icp ? '✅' : '❌') + ' *' + (j.name || '?') + '* (score ' + (ver.score || 0) + ')' + breakdownStr + sonnetTag + '\\n      _' + (ver.reason || '').slice(0, 150) + '_';\n}).join('\\n');\nconst summary = qualified === 0\n  ? '🛑 *Aucune company qualifiée — Flow 4 terminé.*\\n_' + total + ' companies analysées, 0 ✅._'\n  : '✅ *' + qualified + '/' + total + ' compan' + (qualified > 1 ? 'ies qualifiées' : 'y qualifiée') + '*\\n_Lance Flow 2 (Persona Enricher) pour scrap les personas._';\nconst sonnetNote = sonnetReviewed > 0 ? '\\n\\n_🤖 ' + sonnetReviewed + ' verdict(s) re-jugés par Sonnet (cas borderlines)_' : '';\nconst text = '📊 *Flow 4 — Company Qualifier*\\n' + total + ' compan' + (total > 1 ? 'ies analysées' : 'y analysée') + sonnetNote + '\\n\\n_Légende breakdown: I=Industry, C=Country, Sz=Size, Sg=Signals (sur 100). 🤖 = re-jugé Sonnet_\\n\\n' + lines + '\\n\\n' + summary;\nreturn [{ json: { text } }];\n"
+      },
+      "id": "c22e63b3-0d0e-5a00-a866-5f5293165a56",
+      "name": "E_format_done",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1424,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_SLACK_CHANNEL_ID_MONITORING"
+        },
+        "text": "={{ $json.text }}",
+        "otherOptions": {}
+      },
+      "id": "4503e8e9-b0ed-5657-bb66-b39ee9a82f8b",
+      "name": "E_slack_done",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        1520,
+        -112
+      ],
+      "webhookId": "359f5e1a-eaa1-56fa-b0a7-56cd4f87dc6d",
+      "credentials": {
+        "slackApi": {
+          "id": null,
+          "name": "Slack bot"
+        }
+      },
+      "executeOnce": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "flow4-company-qualifier",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "74ddcb25-d2e7-5f78-9aa4-395a7df22dd4",
+      "name": "1w. Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -1808,
+        -16
+      ],
+      "webhookId": "e1cc8f14-8df0-5924-b6a9-0b59841eb870"
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "ok",
+        "options": {}
+      },
+      "id": "91593bc5-614c-5fbb-8905-daa9e0ca8fc9",
+      "name": "1r. Respond OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        -1632,
+        -16
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_SLACK_CHANNEL_ID_MONITORING"
+        },
+        "text": "={{ '✅ *Flow 4 — Company Qualifier* finished\\n*Run:* ' + $json.run_id + '\\n*Batch size:* ' + $json.batch_size }}",
+        "otherOptions": {}
+      },
+      "id": "5497a24a-e1f3-5a5e-8089-5a543ecabb40",
+      "name": "M1. Slack — Flow 4 finished",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        -1552,
+        480
+      ],
+      "webhookId": "3796cb72-13f5-524b-a2e4-21c78aed0769",
+      "credentials": {
+        "slackApi": {
+          "id": null,
+          "name": "Slack bot"
+        }
+      },
+      "executeOnce": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_SLACK_CHANNEL_ID_MONITORING"
+        },
+        "text": "={{ '📥 *Flow 4:* fetched ' + $('2b. Split companies → items').all().length + ' companies (tam_status=new) — about to score via Haiku' }}",
+        "otherOptions": {}
+      },
+      "id": "fdb2ab57-24d9-564f-9e85-24ce79acfdac",
+      "name": "M2. Slack — companies fetched",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        -416,
+        -128
+      ],
+      "webhookId": "b88e6d33-00fa-56c6-830c-632ee690d6a1",
+      "credentials": {
+        "slackApi": {
+          "id": null,
+          "name": "Slack bot"
+        }
+      },
+      "executeOnce": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_SLACK_CHANNEL_ID_MONITORING"
+        },
+        "text": "={{ (() => { const all = $('5.95 Merge confident + reviewed').all(); let q=0,d=0,sr=0; for (const v of all) { const ver = v.json._verdict || {}; if (ver.is_icp) q++; else d++; if (ver._reviewed_by === 'sonnet') sr++; } return '✅ *Flow 4:* scoring done\\n*Qualified:* ' + q + '\\n*Disqualified:* ' + d + (sr > 0 ? '\\n*🤖 Re-jugés Sonnet:* ' + sr + ' (borderlines)' : '') + '\\n_About to PATCH HubSpot tam_status._'; })() }}",
+        "otherOptions": {}
+      },
+      "id": "513b4e08-1f29-5b00-b375-cd564a3fa900",
+      "name": "M3. Slack — scoring done",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        896,
+        -112
+      ],
+      "webhookId": "e71c9d5e-14ee-5090-9cd1-a7cc29549df8",
+      "credentials": {
+        "slackApi": {
+          "id": null,
+          "name": "Slack bot"
+        }
+      },
+      "executeOnce": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst today = new Date().toISOString().split('T')[0];\nconst all = $input.all();\nconst inputs = [];\nfor (const item of all) {\n  const j = item.json;\n  const v = j._verdict || {};\n  if (!j.hs_id) continue;\n  const bk = v.score_breakdown || {};\n  const breakdownStr = (typeof bk.industry_pts === 'number')\n    ? 'Industry ' + (bk.industry_pts||0) + ' + Country ' + (bk.country_pts||0) + ' + Size ' + (bk.size_pts||0) + ' + Signals ' + (bk.signals_pts||0) + ' = ' + (v.score||0)\n    : '';\n  const sonnetTag = v._reviewed_by === 'sonnet' ? ' [🤖 SONNET REVIEW]' : '';\n  const disqTag = v.disqualif_number ? ' [Disqualif #' + v.disqualif_number + ']' : '';\n  const richReason = '*Score:* ' + (v.score || 0) + sonnetTag + disqTag\n    + (breakdownStr ? '\\n*Breakdown:* ' + breakdownStr : '')\n    + (v.reason ? '\\n\\n*Verdict:* ' + v.reason : '')\n    + '\\n\\n*Company scoring date:* ' + today;\n  inputs.push({\n    id: j.hs_id,\n    properties: {\n      tam_status: v.is_icp ? 'qualified' : 'disqualified',\n      score_icp: v.score || 0,\n      qualified_reason: v.is_icp ? richReason : '',\n      disqualif_reason: v.is_icp ? '' : richReason,\n    },\n  });\n}\nconst CHUNK = 100;\nconst out = [];\nfor (let i = 0; i < inputs.length; i += CHUNK) {\n  out.push({ json: { body: { inputs: inputs.slice(i, i + CHUNK) } } });\n}\nreturn out;\n"
+      },
+      "id": "7afb1ed2-e57f-55b8-b9b0-2c8ac60b0d98",
+      "name": "5.4 Prepare batch update payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        992,
+        128
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "is-doubt",
+              "leftValue": "={{ $json._verdict._doubt }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "e1519588-059c-567c-97f6-e51d0cac8c8d",
+      "name": "5.7 IF doubt → Sonnet",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        32,
+        128
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 1500, temperature: 0, messages: [{ role: 'user', content: [{ type: 'text', text: \"You are the company qualification agent of an outbound engine. Target accounts: B2B SaaS companies with 11 to 200 employees, headquartered in the target country given in INPUT.\\n\\nRULE ZERO: DO NOT INVENT RULES.\\n- The list of hard disqualifications below is closed (5 numbered items).\\n- If is_icp is false because of a disqualification, cite its number (1 to 5).\\n- If you cannot cite a number from 1 to 5, is_icp depends ONLY on score >= 50.\\n- A condition that is not listed never disqualifies. It only gives 0 or few points.\\n\\nKEY DISTINCTION: a vertical B2B SaaS is not a company that operates in that sector.\\nTest: does the company sell recurring, multi-customer software to businesses?\\n- If yes, it is B2B SaaS (40 industry points), even when its customers belong to an excluded sector.\\n- Disqualification #2 applies only to companies that operate in the sector themselves.\\nExamples that must NOT be disqualified:\\n- software for local governments = GovTech, qualified\\n- software for dental or physiotherapy practices = HealthTech, qualified\\n- software for real estate agencies = PropTech, qualified\\n- software that helps consumer brands run their marketing = B2B, qualified (not a B2C marketplace)\\n- tools for developers = DevTools, qualified\\n\\nSCORING RUBRIC\\n\\nA. INDUSTRY (max 40)\\n- 40: pure B2B SaaS, horizontal (CRM, sales and marketing tools, data, AI platforms, developer tools, infrastructure, cybersecurity) or vertical (any customer sector, as long as the model is recurring multi-customer software)\\n- 25: software or IT services company with a partial SaaS product\\n- 10: tech services with a little product\\n- 0: consulting or recruiting firm, pure agency, non-SaaS open-source ERP, pure hardware, IT services firm\\n\\nB. HQ COUNTRY (max 25). Read hq_country, hq_city, locations and description.\\n- 25: HQ in the target country\\n- 10: HQ elsewhere, with a clear presence in the target country (office, sales team, most employees)\\n- 0: no presence detected\\n\\nC. COMPANY SIZE (max 20), strict table:\\n| employees | points |\\n| 1 to 10 | 0 |\\n| 11 to 50 | 15 |\\n| 51 to 200 | 20 |\\n| 201 to 500 | 5 |\\n| 501 and more | 0 |\\n\\nD. GROWTH SIGNALS (max 15). +5 per LITERAL signal found in the description (max 3):\\n\\\"scaling sales\\\", \\\"outbound\\\", \\\"international expansion\\\", \\\"raised Series A/B/C\\\", \\\"hiring SDR/BDR/AE/CRO/VP Sales\\\", \\\"new GTM motion\\\", \\\"building sales team\\\", \\\"go-to-market\\\"\\n\\nFINAL SCORE = A + B + C + D (integer from 0 to 100)\\n\\nHARD DISQUALIFICATIONS (closed list, 5 items). If you disqualify, cite a number from 1 to 5. Otherwise do NOT disqualify.\\n#1. Pure B2C marketplace or store selling to consumers. Do not confuse it with B2B platforms that sell software to brands.\\n#2. The company itself operates in an excluded sector. Closed list: healthcare provider (hospital, clinic, lab), real estate agency, video game studio, pharmaceutical manufacturer, energy producer, pure hardware manufacturer without its own software.\\n#3. Holding company with no product of its own.\\n#4. Closed, suspended or acquired company (\\\"acquired by\\\", \\\"ceased operations\\\").\\n#5. Open-source ERP sold through integration services, without recurring SaaS licences.\\n\\nDO NOT DISQUALIFY FOR (0 points only): HQ abroad, more than 500 employees, no growth signal, \\\"software / IT services\\\" industry (25 points), a customer sector that is not listed in #2.\\n\\nSOFT SIGNAL: has_gtm_engineer = true if the description mentions \\\"GTM Engineer\\\", \\\"Sales Ops Engineer\\\", \\\"RevOps Engineer\\\" or \\\"Revenue Operations Engineer\\\".\\n\\nELIGIBILITY: is_icp = true ONLY IF score >= 50 AND no hard disqualification applies.\\n\\nOUTPUT: STRICT JSON\\n- ONE JSON block in your answer. Never two.\\n- No text before or after the JSON. No prose. No markdown.\\n- If you detect a math error, rewrite the single JSON block.\\n\\nExact format:\\n{\\\"is_icp\\\": bool, \\\"score\\\": 0-100, \\\"score_breakdown\\\": {\\\"industry_pts\\\": N, \\\"country_pts\\\": N, \\\"size_pts\\\": N, \\\"signals_pts\\\": N}, \\\"reason\\\": \\\"<industry X pts> + <country Y pts> + <size Z pts> + <signals W pts> = <total>. Disqualification: <#N or none>\\\", \\\"country_detected\\\": string, \\\"industry_match\\\": bool, \\\"size_in_range\\\": bool, \\\"is_b2b\\\": bool, \\\"has_gtm_engineer\\\": bool, \\\"is_vertical_saas_b2b\\\": bool, \\\"disqualif_number\\\": \\\"1-5 or null\\\"}\", cache_control: { type: 'ephemeral' } }, { type: 'text', text: '\\n\\nAUDIT: check the previous Haiku verdict and fix it if it is wrong.\\nPrevious Haiku verdict: ' + JSON.stringify($json._verdict || {}) + '\\n\\nINPUT:\\n- ICP location: France\\n- size_min: 11\\n- size_max: 200\\n- company_data: ' + JSON.stringify($json).slice(0, 8000) }] }] }) }}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 500
+            }
+          },
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          },
+          "timeout": 60000
+        }
+      },
+      "id": "fb64c2c9-571d-5112-ad9b-40885b6b0b1c",
+      "name": "5.8 Sonnet re-qualify (doubts only)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        272,
+        -64
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "Anthropic API (x-api-key)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "\nfunction findLastValidJson(text) {\n  if (!text) return null;\n  const blocks = []; let depth = 0, start = -1;\n  for (let i = 0; i < text.length; i++) {\n    if (text[i] === '{') { if (depth === 0) start = i; depth++; }\n    else if (text[i] === '}') { depth--; if (depth === 0 && start >= 0) { blocks.push([start, i + 1]); start = -1; } }\n  }\n  for (let i = blocks.length - 1; i >= 0; i--) {\n    try {\n      const obj = JSON.parse(text.substring(blocks[i][0], blocks[i][1]));\n      if (obj && typeof obj === 'object' && 'is_icp' in obj) return obj;\n    } catch (e) {}\n  }\n  return null;\n}\nfunction clamp(n, min, max) { const x = typeof n === 'number' ? n : 0; return Math.max(min, Math.min(max, x)); }\nfunction sizePtsFromCount(emp) {\n  if (!emp || emp < 1) return 0;\n  if (emp <= 10) return 0; if (emp <= 50) return 15; if (emp <= 200) return 20; if (emp <= 500) return 5;\n  return 0;\n}\n\nconst all = $input.all();\nconst out = [];\nfor (let i = 0; i < all.length; i++) {\n  const item = all[i];\n  const t = item.json?.content?.[0]?.text || '';\n  const v = findLastValidJson(t) || {};\n  // Get original company data — IF TRUE branch passes the item with _verdict from Haiku\n  // We need the company props from the input that triggered this\n  // Actually the input item.json contains the Sonnet HTTP response, not the original.\n  // In n8n, when an HTTP node receives input, the output by default contains the response.\n  // We need to access the original via $('5.6 Parse Haiku verdict').itemMatching() — but with branch filter, indices differ.\n  // Solution: pass through the original by setting \"Append a property\" in the HTTP node, OR use $('5.7 IF...').\n  // Simpler: itemMatching against the IF TRUE output\n  const orig = $('5.7 IF doubt → Sonnet').itemMatching(i)?.json || {};\n  const empCount = Number(orig.numberofemployees || 0);\n\n  const bk = v.score_breakdown || {};\n  const industry_pts = clamp(bk.industry_pts, 0, 40);\n  const country_pts = clamp(bk.country_pts, 0, 25);\n  const size_pts_sonnet = clamp(bk.size_pts, 0, 20);\n  const size_pts_computed = sizePtsFromCount(empCount);\n  const size_pts = empCount > 0 ? size_pts_computed : size_pts_sonnet;\n  const signals_pts = clamp(bk.signals_pts, 0, 15);\n\n  const disqNum = v.disqualif_number && /^[1-5]$/.test(String(v.disqualif_number).trim()) ? String(v.disqualif_number).trim() : null;\n  const sum = industry_pts + country_pts + size_pts + signals_pts;\n  const score = disqNum ? 0 : sum;\n  const is_icp = !disqNum && score >= 50;\n\n  // Build new verdict OVERRIDING Haiku's\n  out.push({\n    json: {\n      ...orig,\n      _verdict: {\n        is_icp, score,\n        score_breakdown: { industry_pts, country_pts, size_pts, signals_pts },\n        reason: '[SONNET REVIEW] ' + (v.reason || ''),\n        has_gtm_engineer: v.has_gtm_engineer === true,\n        disqualif_number: disqNum,\n        _doubt: false,  // resolved\n        _reviewed_by: 'sonnet',\n        _audit: {\n          ...(orig._verdict?._audit || {}),\n          sonnet_score: typeof v.score === 'number' ? v.score : null,\n          sonnet_is_icp: v.is_icp === true,\n          sonnet_breakdown: bk,\n          haiku_was_wrong: orig._verdict?.is_icp !== is_icp,\n        },\n      },\n    },\n  });\n}\nreturn out;\n"
+      },
+      "id": "27d8ef3b-aa5e-5546-b8e3-f2b1df18af42",
+      "name": "5.9 Parse Sonnet + Override",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        496,
+        -64
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "0a59aa53-9bb4-5379-b1dd-f4cd72004701",
+      "name": "5.95 Merge confident + reviewed",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.1,
+      "position": [
+        768,
+        128
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/companies/search",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ filterGroups: [{ filters: [{ propertyName: 'tam_status', operator: 'NOT_HAS_PROPERTY' }] }, { filters: [{ propertyName: 'tam_status', operator: 'EQ', value: 'new' }] }], properties: ['tam_domain'], limit: 1 }) }}",
+        "options": {}
+      },
+      "id": "b739e57e-806c-55a8-8424-94aa7c6740ef",
+      "name": "1.5 HS Count remaining",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -1456,
+        96
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "HubSpot private app (Bearer)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst total = $input.first().json.total || 0;\nconst batchSize = $('1c. Normalize Input').first().json.batch_size || 0;\nreturn [{ json: { remaining: total, batch_size: batchSize, run_id: $('1c. Normalize Input').first().json.run_id } }];\n"
+      },
+      "id": "12900b72-12e1-562a-9170-29719649dc2b",
+      "name": "1.6 Parse count",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1312,
+        96
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_SLACK_CHANNEL_ID_MONITORING"
+        },
+        "text": "={{ $json.remaining === 0 ? '🛑 *Flow 4 — Company Qualifier* arrêté\\n*0 companies à qualifier* (tam_status=new ou unassigned)\\nLance Flow 3 pour ingérer plus de TAM, ou modifie tam_status manuellement.' : '🚀 *Flow 4 — Company Qualifier* started\\n*Companies à qualifier:* ' + $json.remaining + ' (tam_status=new ou unassigned)\\n*Batch size:* ' + $json.batch_size + '\\n*Run:* ' + $json.run_id }}",
+        "otherOptions": {}
+      },
+      "id": "d0803cfa-13b3-549a-9e11-6deec0cce22c",
+      "name": "1.7 Slack — count notify",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        -1200,
+        -64
+      ],
+      "webhookId": "85dad8f3-e123-5bf4-bad2-52a1c1ab3068",
+      "credentials": {
+        "slackApi": {
+          "id": null,
+          "name": "Slack bot"
+        }
+      },
+      "executeOnce": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "has-companies",
+              "leftValue": "={{ $json.remaining }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "10ed6946-8b1e-572f-9c6c-5548046d6faa",
+      "name": "1.8 IF remaining > 0",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -1088,
+        96
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 0 7 * * *"
+            }
+          ]
+        }
+      },
+      "id": "225ed76e-72ac-5905-b398-a8d5200a5f02",
+      "name": "Schedule daily 07:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -2240,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "{\"body\": {\"batch_size\": 50, \"source\": \"schedule-daily\"}}",
+        "options": {}
+      },
+      "id": "ae6a8a5a-efd1-5ca5-af1b-332173cd4238",
+      "name": "Schedule defaults",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -2016,
+        208
+      ]
+    }
+  ],
+  "connections": {
+    "1. Form Trigger": {
+      "main": [
+        [
+          {
+            "node": "1c. Normalize Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "1c. Normalize Input": {
+      "main": [
+        [
+          {
+            "node": "1.5 HS Count remaining",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "M1. Slack — Flow 4 finished",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "2. HS Search tam_status=new": {
+      "main": [
+        [
+          {
+            "node": "2b. Split companies → items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "2b. Split companies → items": {
+      "main": [
+        [
+          {
+            "node": "5. Score Company (Haiku)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "M2. Slack — companies fetched",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "5. Score Company (Haiku)": {
+      "main": [
+        [
+          {
+            "node": "5.6 Parse Haiku verdict",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "5.6 Parse Haiku verdict": {
+      "main": [
+        [
+          {
+            "node": "5.7 IF doubt → Sonnet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "5.5 Update HS Company post-scoring": {
+      "main": [
+        [
+          {
+            "node": "E_format_done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "E_format_done": {
+      "main": [
+        [
+          {
+            "node": "E_slack_done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "1w. Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "1r. Respond OK",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "1c. Normalize Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "5.4 Prepare batch update payload": {
+      "main": [
+        [
+          {
+            "node": "5.5 Update HS Company post-scoring",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "5.7 IF doubt → Sonnet": {
+      "main": [
+        [
+          {
+            "node": "5.8 Sonnet re-qualify (doubts only)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "5.95 Merge confident + reviewed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "5.8 Sonnet re-qualify (doubts only)": {
+      "main": [
+        [
+          {
+            "node": "5.9 Parse Sonnet + Override",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "5.9 Parse Sonnet + Override": {
+      "main": [
+        [
+          {
+            "node": "5.95 Merge confident + reviewed",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "5.95 Merge confident + reviewed": {
+      "main": [
+        [
+          {
+            "node": "5.4 Prepare batch update payload",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "M3. Slack — scoring done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "1.5 HS Count remaining": {
+      "main": [
+        [
+          {
+            "node": "1.6 Parse count",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "1.6 Parse count": {
+      "main": [
+        [
+          {
+            "node": "1.7 Slack — count notify",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "1.8 IF remaining > 0",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "1.8 IF remaining > 0": {
+      "main": [
+        [
+          {
+            "node": "2. HS Search tam_status=new",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Schedule daily 07:00": {
+      "main": [
+        [
+          {
+            "node": "Schedule defaults",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule defaults": {
+      "main": [
+        [
+          {
+            "node": "1c. Normalize Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  }
+}

@@ -1,0 +1,701 @@
+{
+  "name": "Flow 3 — TAM Ingestion (SN → HubSpot)",
+  "nodes": [
+    {
+      "parameters": {
+        "formTitle": "Flow 3 — TAM Ingestion (CSV ou Sales Nav search)",
+        "formDescription": "Soit upload un CSV (Phantombuster, etc.), soit lance une search LinkedIn Company directement (laisse CSV vide). Dedup tam_last_scrap < 30j.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "CSV upload (optionnel — laisse vide si tu lances une search ci-dessous)",
+              "fieldType": "file",
+              "multipleFiles": false,
+              "acceptFileTypes": ".csv"
+            },
+            {
+              "fieldLabel": "Max companies (safety cap, leave empty for all)",
+              "placeholder": "500"
+            },
+            {
+              "fieldLabel": "— Ou search LinkedIn (mode alternatif) —",
+              "placeholder": "(label séparateur)"
+            },
+            {
+              "fieldLabel": "Search query (mots-clés LinkedIn, ex: SaaS B2B)",
+              "placeholder": "SaaS B2B"
+            },
+            {
+              "fieldLabel": "Locations (comma-separated, ex: France,Belgium)",
+              "placeholder": "France"
+            },
+            {
+              "fieldLabel": "Industry IDs (comma-separated, 4=Software Dev — voir doc harvestapi)",
+              "placeholder": "4"
+            },
+            {
+              "fieldLabel": "Company size (comma-separated parmi: 1-10,11-50,51-200,201-500,501-1000,1001-5000)",
+              "placeholder": "11-50,51-200"
+            },
+            {
+              "fieldLabel": "Max pages (1 page = 50 companies, max 20)",
+              "placeholder": "3"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "4bd10947-6957-5f54-b8c9-6fa255353265",
+      "name": "1. Form Trigger",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.2,
+      "position": [
+        -2208,
+        224
+      ],
+      "webhookId": "5dc3abf9-9a74-5003-9ebe-5fe016a2cde5"
+    },
+    {
+      "parameters": {
+        "jsCode": "const first = $input.first();\nconst data = first.json;\nconst body = data.body || data;\n\n// CSV mode? — file binary present\nconst hasFile = !!(first.binary && Object.keys(first.binary).length > 0);\n\n// Read all form fields by label substring (form-trigger uses labels as keys)\nfunction getField(substr) {\n  for (const k in body) {\n    if (k.toLowerCase().includes(substr.toLowerCase())) return body[k];\n  }\n  return '';\n}\n\nconst max = body['max_companies'] ?? getField('Max companies');\nconst searchQuery = String(getField('Search query') || '').trim();\nconst locationsRaw = String(getField('Locations') || '').trim();\nconst industryRaw = String(getField('Industry IDs') || '').trim();\nconst sizeRaw = String(getField('Company size') || '').trim();\nconst pagesRaw = String(getField('Max pages') || '').trim();\n\n// Mode resolution: search wins if searchQuery filled (file is the legacy default)\nlet mode = 'csv';\nif (searchQuery && !hasFile) mode = 'search';\nelse if (searchQuery && hasFile) mode = 'csv';  // fallback: CSV takes priority if both\nelse if (!searchQuery && !hasFile) mode = 'empty';\n\nconst out = {\n  mode,\n  max_companies: max ? Number(max) : 9999,\n  run_id: 'tam-' + Date.now(),\n  // Search params (only used if mode === 'search')\n  searchQuery,\n  locations: locationsRaw ? locationsRaw.split(',').map(s => s.trim()).filter(Boolean) : ['France'],\n  industryIds: industryRaw ? industryRaw.split(',').map(s => s.trim()).filter(Boolean) : ['4'],\n  companySize: sizeRaw ? sizeRaw.split(',').map(s => s.trim()).filter(Boolean) : ['11-50','51-200'],\n  takePages: pagesRaw ? Number(pagesRaw) : 3,\n};\n\nreturn [{\n  json: out,\n  binary: hasFile ? first.binary : undefined,\n}];"
+      },
+      "id": "51fbc629-5461-5226-872d-2b030794fba7",
+      "name": "1c. Normalize Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2000,
+        224
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/companies/search",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ filterGroups: [{ filters: [{ propertyName: 'tam_domain', operator: 'EQ', value: $json.domain }] }], properties: ['tam_domain', 'tam_status', 'tam_last_scrap'], limit: 1 }) }}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 250
+            }
+          }
+        }
+      },
+      "id": "acfe5a47-2031-5581-845d-39c97bceda93",
+      "name": "3.5a Pre-lookup HS Company",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -736,
+        208
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "HubSpot private app (Bearer)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst all = $input.all();\nconst out = [];\nfor (let i = 0; i < all.length; i++) {\n  const search = all[i].json;\n  const orig = $('2b. Map CSV columns + cap').itemMatching(i)?.json || {};\n  const existing = (search.results && search.results[0]) || null;\n  out.push({ json: { ...orig, _existing: existing } });\n}\nreturn out;\n"
+      },
+      "id": "3fb3af7a-53d8-594d-92be-56708cb5bcf1",
+      "name": "3.5b Merge company + existing",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -544,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "skip-known",
+              "leftValue": "={{ (() => { const e = $json._existing; if (!e || !e.properties) return false; const last = e.properties.tam_last_scrap; if (!last) return false; const ageDays = (Date.now() - new Date(last).getTime()) / 86400000; return ageDays < 30; })() }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "1aca4da6-f127-5258-a02e-a0382ff5373e",
+      "name": "3.5c IF skip already known < 30j",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -352,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst today = new Date().toISOString().split('T')[0];\n\n// Mapping freshdata industry strings → HubSpot native industry enum\nfunction mapIndustryToHS(industry) {\n  if (!industry) return '';\n  const i = String(industry).toLowerCase();\n  // Exact mappings (priority)\n  const map = {\n    'software development': 'COMPUTER_SOFTWARE',\n    'desktop computing software products': 'COMPUTER_SOFTWARE',\n    'embedded software products': 'COMPUTER_SOFTWARE',\n    'computer networking products': 'COMPUTER_NETWORKING',\n    'data security software products': 'COMPUTER_NETWORK_SECURITY',\n    'computer hardware': 'COMPUTER_HARDWARE',\n    'computer games': 'COMPUTER_GAMES',\n    'information technology and services': 'INFORMATION_TECHNOLOGY_AND_SERVICES',\n    'information technology & services': 'INFORMATION_TECHNOLOGY_AND_SERVICES',\n    'internet': 'INTERNET',\n    'telecommunications': 'TELECOMMUNICATIONS',\n    'financial services': 'FINANCIAL_SERVICES',\n    'banking': 'BANKING',\n    'insurance': 'INSURANCE',\n    'real estate': 'REAL_ESTATE',\n    'marketing and advertising': 'MARKETING_AND_ADVERTISING',\n    'human resources': 'HUMAN_RESOURCES',\n    'staffing and recruiting': 'STAFFING_AND_RECRUITING',\n    'management consulting': 'MANAGEMENT_CONSULTING',\n    'logistics and supply chain': 'LOGISTICS_AND_SUPPLY_CHAIN',\n    'transportation/trucking/railroad': 'TRANSPORTATION_TRUCKING_RAILROAD',\n    'retail': 'RETAIL',\n    'hospitality': 'HOSPITALITY',\n    'restaurants': 'RESTAURANTS',\n    'food & beverages': 'FOOD_BEVERAGES',\n    'health, wellness and fitness': 'HEALTH_WELLNESS_AND_FITNESS',\n    'hospital & health care': 'HOSPITAL_HEALTH_CARE',\n    'medical practice': 'MEDICAL_PRACTICE',\n    'medical devices': 'MEDICAL_DEVICES',\n    'pharmaceuticals': 'PHARMACEUTICALS',\n    'biotechnology': 'BIOTECHNOLOGY',\n    'education management': 'EDUCATION_MANAGEMENT',\n    'e-learning': 'ELEARNING',\n    'government administration': 'GOVERNMENT_ADMINISTRATION',\n    'public policy': 'PUBLIC_POLICY',\n    'legal services': 'LEGAL_SERVICES',\n    'law practice': 'LAW_PRACTICE',\n    'automotive': 'AUTOMOTIVE',\n    'electrical/electronic manufacturing': 'ELECTRICAL_ELECTRONIC_MANUFACTURING',\n    'mechanical or industrial engineering': 'MECHANICAL_OR_INDUSTRIAL_ENGINEERING',\n    'oil & energy': 'OIL_ENERGY',\n    'renewables & environment': 'RENEWABLES_ENVIRONMENT',\n    'utilities': 'UTILITIES',\n    'mining & metals': 'MINING_METALS',\n    'construction': 'CONSTRUCTION',\n    'farming': 'FARMING',\n    'apparel & fashion': 'APPAREL_FASHION',\n  };\n  if (map[i]) return map[i];\n  // Heuristic fallbacks\n  if (i.includes('software')) return 'COMPUTER_SOFTWARE';\n  if (i.includes('saas') || i.includes('cloud')) return 'COMPUTER_SOFTWARE';\n  if (i.includes('network')) return 'COMPUTER_NETWORKING';\n  if (i.includes('security')) return 'COMPUTER_NETWORK_SECURITY';\n  if (i.includes('it services') || i.includes('information technology')) return 'INFORMATION_TECHNOLOGY_AND_SERVICES';\n  return '';  // unmapped → leave empty (HubSpot won't reject)\n}\n\nconst allInputs = $input.all().map(item => {\n  const j = item.json;\n  const dom = String(j.domain || '').toLowerCase().trim();\n  const isNew = !j._existing;\n  const props = {\n    tam_domain: dom,\n    domain: dom,\n    name: j.company_name || '',\n    website: j.website || '',\n    numberofemployees: (typeof j.employee_count === 'number') ? j.employee_count : null,\n    description: ((j.description || '') + '').slice(0, 5000),\n    linkedin_company_page: j.linkedin_url || '',\n    tam_status: 'new',\n    tam_last_scrap: today,\n    persona_enrichment_status: '',\n    tam_industry: j.industry || '',  // custom free text\n    country: j.hq_country || '',\n    state: j.hq_region || '',\n    city: j.hq_city || '',\n  };\n  // Native HubSpot industry enum (only set if mappable)\n  const hsIndustry = mapIndustryToHS(j.industry);\n  if (hsIndustry) props.industry = hsIndustry;\n  if (isNew) props.tam_first_seen = today;\n  return { idProperty: 'tam_domain', id: dom, properties: props };\n});\n\nconst CHUNK = 100;\nconst out = [];\nfor (let i = 0; i < allInputs.length; i += CHUNK) {\n  out.push({ json: { body: { inputs: allInputs.slice(i, i + CHUNK) } } });\n}\nreturn out;\n"
+      },
+      "id": "826603c9-e734-5fa9-b3ea-72c1e0beea33",
+      "name": "4.5a Prepare Company payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -144,
+        224
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/companies/batch/upsert",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 2000
+            }
+          }
+        }
+      },
+      "id": "2ee84fdf-a59b-54a4-9dea-e1157f46ad62",
+      "name": "4.5b Push HS Company brut",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        80,
+        224
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "HubSpot private app (Bearer)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://api.hubapi.com/crm/v3/objects/companies/{{ $json._existing.id }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ properties: { tam_last_scrap: new Date().toISOString().split('T')[0] } }) }}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 250
+            }
+          }
+        }
+      },
+      "id": "3ff68dbe-053c-56b3-b34a-95eb20de41c9",
+      "name": "3.5d PATCH tam_last_scrap (skipped)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -96,
+        0
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "HubSpot private app (Bearer)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "\nlet fr_count = 0, sn_count = 0, skipped_count = 0, pushed_count = 0;\ntry { fr_count = $('2b. Map CSV columns + cap').all().length; } catch(e) {}\ntry { sn_count = fr_count; } catch(e) {}\ntry { skipped_count = $('3.5d PATCH tam_last_scrap (skipped)').all().length; } catch(e) {}\ntry { pushed_count = $('4.5b Push HS Company brut').all().length; } catch(e) {}\nconst text = '🌍 *Flow 3 — TAM Ingestion terminée*\\n• CSV parsées : ' + sn_count + '\\n• Skippés (déjà connus < 30j) : ' + skipped_count + '\\n• ✨ Nouveaux pushés HubSpot : ' + pushed_count + '\\n\\n_Lance Flow 4 (Company Qualifier) pour scorer les nouveaux._';\nreturn [{ json: { text } }];\n"
+      },
+      "id": "e3b0cca2-8635-57a3-a8b9-c628bece0f3b",
+      "name": "E_format_done",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_SLACK_CHANNEL_ID_MONITORING"
+        },
+        "text": "={{ $json.text }}",
+        "otherOptions": {}
+      },
+      "id": "2372d23e-7d4e-5b91-8769-26cde601d349",
+      "name": "E_slack_done",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        672,
+        224
+      ],
+      "webhookId": "f1dce53f-976f-567e-8aa9-2fed657f5f47",
+      "credentials": {
+        "slackApi": {
+          "id": null,
+          "name": "Slack bot"
+        }
+      },
+      "executeOnce": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "binaryPropertyName": "Phantombuster_CSV",
+        "fileFormat": "csv",
+        "options": {
+          "headerRow": true,
+          "includeEmptyCells": false
+        }
+      },
+      "id": "b0fab82d-dadd-586c-b946-10ad764c9f9b",
+      "name": "2a. Parse CSV",
+      "type": "n8n-nodes-base.spreadsheetFile",
+      "typeVersion": 2,
+      "position": [
+        -1488,
+        288
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst max = $('1c. Normalize Input').first().json.max_companies || 9999;\nconst items = $input.all();\nconst out = [];\nfunction pick(j, names) {\n  for (const n of names) {\n    if (j[n] !== undefined && j[n] !== null && j[n] !== '') return j[n];\n  }\n  return '';\n}\nfunction parseEmpRange(v) {\n  if (typeof v === 'number') return v;\n  if (!v) return null;\n  const m = String(v).match(/(\\d+)\\s*[-–]\\s*(\\d+)/);\n  if (m) return Math.round((Number(m[1]) + Number(m[2])) / 2);\n  const single = String(v).match(/(\\d+)/);\n  return single ? Number(single[1]) : null;\n}\nlet dropped = 0;\nfor (const item of items) {\n  if (out.length >= max) break;\n  const j = item.json || {};\n  const name = pick(j, ['companyName', 'company_name', 'Company Name', 'name', 'company', 'Company']);\n  const website = pick(j, ['website', 'companyUrl', 'Website', 'company_website', 'companyWebsite', 'site_web']);\n  const linkedinUrl = pick(j, ['linkedinUrl', 'companyLinkedinUrl', 'company_linkedin_url', 'profileUrl', 'sales_nav_url', 'companySalesNavigatorUrl', 'company_url', 'navigationUrl', 'sales_link', 'linkedin_url']);\n  const cleanWebsite = website && !String(website).includes('linkedin.com/redir') ? website : '';\n  const fromWebsite = String(cleanWebsite || '').replace(/^https?:\\/\\//, '').replace(/^www\\./, '').split('/')[0];\n  const rawDomain = pick(j, ['domain', 'companyDomain', 'company_domain', 'Domain']) || fromWebsite || '';\n  const domain = String(rawDomain).toLowerCase().trim();\n  if (!domain) { dropped++; continue; }\n  const empCount = parseEmpRange(pick(j, ['employeeCount', 'employee_count', 'staffCount', 'numberOfEmployees', 'employees']));\n  const empRange = pick(j, ['companySize', 'employeeRange', 'staffRange', 'company_employee_range', 'sizeRange', 'employee_range']);\n  const industry = pick(j, ['industry', 'companyIndustry', 'Industry', 'company_industry']);\n  const description = pick(j, ['description', 'companyDescription', 'about', 'tagline', 'company_description', 'About']);\n  const company_id = pick(j, ['companyId', 'company_id', 'vmid', 'companyVmid']);\n  // Location fields\n  const hq_country = pick(j, ['hq_country', 'country', 'companyCountry', 'Country']);\n  const hq_city = pick(j, ['hq_city', 'city', 'companyCity', 'City']);\n  const hq_region = pick(j, ['hq_region', 'state', 'region', 'companyRegion']);\n  out.push({ json: {\n    company_name: name,\n    website: cleanWebsite,\n    linkedin_url: linkedinUrl,\n    domain,\n    employee_count: empCount || (empRange ? parseEmpRange(empRange) : null),\n    employee_range: empRange,\n    industry,\n    description,\n    company_id,\n    hq_country, hq_city, hq_region,\n    _raw: j,\n  }});\n}\nif (dropped > 0) console.log('Dropped (no domain): ' + dropped);\nreturn out;\n"
+      },
+      "id": "338c575a-932b-58e8-8579-9286b02288c0",
+      "name": "2b. Map CSV columns + cap",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1248,
+        288
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_SLACK_CHANNEL_ID_MONITORING"
+        },
+        "text": "={{ '✅ *Flow 3 — TAM Ingestion* finished\\n*Run:* ' + $json.run_id + '\\n*Max:* ' + $json.max_companies }}",
+        "otherOptions": {}
+      },
+      "id": "d67b9f09-7e23-5b2a-89e9-c013d50a644a",
+      "name": "M1. Slack — Flow 3 finished",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        -1824,
+        0
+      ],
+      "webhookId": "7566352b-ed94-5cbb-8ac4-2ff946149602",
+      "credentials": {
+        "slackApi": {
+          "id": null,
+          "name": "Slack bot"
+        }
+      },
+      "executeOnce": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_SLACK_CHANNEL_ID_MONITORING"
+        },
+        "text": "={{ '📋 *Flow 3:* CSV parsed\\n*Companies kept:* ' + $('2b. Map CSV columns + cap').all().length + ' (after domain filter)' }}",
+        "otherOptions": {}
+      },
+      "id": "45beeb5a-06ed-5c05-a395-e332e0738fd9",
+      "name": "M2. Slack — CSV parsed",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        -1072,
+        512
+      ],
+      "webhookId": "9004cc81-b991-5b4b-8d35-df87c1ab5c14",
+      "credentials": {
+        "slackApi": {
+          "id": null,
+          "name": "Slack bot"
+        }
+      },
+      "executeOnce": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_SLACK_CHANNEL_ID_MONITORING"
+        },
+        "text": "={{ (() => { let pushed = 0; let skipped = 0; try { pushed = $('4.5b Push HS Company brut').all().length; } catch(e) {} try { skipped = $('3.5d PATCH tam_last_scrap (skipped)').all().length; } catch(e) {} return '💾 *Flow 3:* HubSpot push done\\n*Pushed:* ' + pushed + ' new/updated\\n*Skipped (<30j):* ' + skipped; })() }}",
+        "otherOptions": {}
+      },
+      "id": "e409a64f-fee8-53fa-99ab-0588d21ac6cb",
+      "name": "M3. Slack — HS push done",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        304,
+        224
+      ],
+      "webhookId": "b3b1619c-7126-52b5-8fc5-a15ccd07f881",
+      "credentials": {
+        "slackApi": {
+          "id": null,
+          "name": "Slack bot"
+        }
+      },
+      "executeOnce": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {},
+      "id": "d4030dc4-8cf1-5417-be86-9df3beeed4d1",
+      "name": "M_merge paths (skipped + pushed)",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.1,
+      "position": [
+        288,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.mode }}",
+              "rightValue": "search",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "1be7d085-fdc0-5399-b21e-7a02bb24fccd",
+      "name": "1.5 Mode router (search vs csv)",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -1776,
+        224
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "Run actor and get dataset",
+        "actorId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "harvestapi~linkedin-company-search"
+        },
+        "customBody": "={{ JSON.stringify({ searchQuery: $('1c. Normalize Input').first().json.searchQuery, locations: $('1c. Normalize Input').first().json.locations, industryIds: $('1c. Normalize Input').first().json.industryIds, companySize: $('1c. Normalize Input').first().json.companySize, scraperMode: 'full', takePages: $('1c. Normalize Input').first().json.takePages, maxItems: $('1c. Normalize Input').first().json.max_companies }) }}"
+      },
+      "id": "7942ef44-488d-5ccd-8f82-d5e3945a1e72",
+      "name": "2c. Apify — Company search",
+      "type": "@apify/n8n-nodes-apify.apify",
+      "typeVersion": 1,
+      "position": [
+        -1488,
+        16
+      ],
+      "credentials": {
+        "apifyApi": {
+          "id": null,
+          "name": "Apify"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Map harvestapi/linkedin-company-search output → standard shape (same as 2b. Map CSV)\nconst max = $('1c. Normalize Input').first().json.max_companies || 9999;\nconst items = $input.all();\nconst out = [];\n\nfunction deriveDomain(website) {\n  if (!website) return '';\n  return String(website).toLowerCase()\n    .replace(/^https?:\\/\\//, '')\n    .replace(/^www\\./, '')\n    .split('/')[0]\n    .trim();\n}\n\nlet dropped = 0;\nfor (const item of items) {\n  if (out.length >= max) break;\n  const j = item.json || {};\n  const website = j.website || '';\n  const domain = deriveDomain(website);\n  if (!domain) { dropped++; continue; }\n\n  const loc = (j.locations && j.locations[0]) || {};\n  const parsed = loc.parsed || {};\n  const hq_country = parsed.country || loc.country || '';\n  const hq_city    = parsed.city || loc.city || '';\n  const hq_region  = parsed.state || loc.geographicArea || '';\n\n  const empCount = (typeof j.employeeCount === 'number') ? j.employeeCount : null;\n  const empRange = j.employeeCountRange ? (j.employeeCountRange.start + '-' + j.employeeCountRange.end) : '';\n\n  const industry = (j.industries && j.industries[0] && (j.industries[0].title || j.industries[0].name)) || '';\n\n  out.push({ json: {\n    company_name: j.name || '',\n    website,\n    linkedin_url: j.linkedinUrl || '',\n    domain,\n    employee_count: empCount,\n    employee_range: empRange,\n    industry,\n    description: j.description || j.tagline || '',\n    company_id: j.id || '',\n    hq_country, hq_city, hq_region,\n    _raw: j,\n  }});\n}\nif (dropped > 0) console.log('Dropped (no domain): ' + dropped);\nreturn out;"
+      },
+      "id": "9585c948-edba-5348-9c56-05b24d362c8e",
+      "name": "2d. Map search output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1264,
+        16
+      ]
+    }
+  ],
+  "connections": {
+    "1. Form Trigger": {
+      "main": [
+        [
+          {
+            "node": "1c. Normalize Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "1c. Normalize Input": {
+      "main": [
+        [
+          {
+            "node": "1.5 Mode router (search vs csv)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "M1. Slack — Flow 3 finished",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "3.5a Pre-lookup HS Company": {
+      "main": [
+        [
+          {
+            "node": "3.5b Merge company + existing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "3.5b Merge company + existing": {
+      "main": [
+        [
+          {
+            "node": "3.5c IF skip already known < 30j",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "3.5c IF skip already known < 30j": {
+      "main": [
+        [
+          {
+            "node": "3.5d PATCH tam_last_scrap (skipped)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "4.5a Prepare Company payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "4.5a Prepare Company payload": {
+      "main": [
+        [
+          {
+            "node": "4.5b Push HS Company brut",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "4.5b Push HS Company brut": {
+      "main": [
+        [
+          {
+            "node": "M_merge paths (skipped + pushed)",
+            "type": "main",
+            "index": 1
+          },
+          {
+            "node": "M3. Slack — HS push done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "3.5d PATCH tam_last_scrap (skipped)": {
+      "main": [
+        [
+          {
+            "node": "M_merge paths (skipped + pushed)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "E_format_done": {
+      "main": [
+        [
+          {
+            "node": "E_slack_done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "2a. Parse CSV": {
+      "main": [
+        [
+          {
+            "node": "2b. Map CSV columns + cap",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "2b. Map CSV columns + cap": {
+      "main": [
+        [
+          {
+            "node": "3.5a Pre-lookup HS Company",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "M2. Slack — CSV parsed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "M_merge paths (skipped + pushed)": {
+      "main": [
+        [
+          {
+            "node": "E_format_done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "1.5 Mode router (search vs csv)": {
+      "main": [
+        [
+          {
+            "node": "2c. Apify — Company search",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "2a. Parse CSV",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "2c. Apify — Company search": {
+      "main": [
+        [
+          {
+            "node": "2d. Map search output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "2d. Map search output": {
+      "main": [
+        [
+          {
+            "node": "3.5a Pre-lookup HS Company",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  }
+}

@@ -1,0 +1,1515 @@
+{
+  "name": "Flow 2 — Persona Enricher (HS qualified pipeline)",
+  "nodes": [
+    {
+      "parameters": {
+        "formTitle": "Flow 2 — Persona Enricher (HS qualified pipeline)",
+        "formDescription": "Pioche les companies tam_status=qualified non encore enrichies persona, scrape employees + full profiles, score, push HS Contact qualifié.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Batch size (companies)",
+              "placeholder": "10",
+              "requiredField": true
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "7895f92b-b3b6-5191-a9ea-61205d8b6c8d",
+      "name": "1. Form Trigger",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.2,
+      "position": [
+        -3120,
+        160
+      ],
+      "webhookId": "9a398e85-3804-597f-b859-fcafc716960a"
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\nconst body = data.body || data;\nconst requested = Number(body['batch_size'] ?? body['Batch size'] ?? 10);\n// Apify Company Employees actor caps at 10 in 'all_at_once' mode\nconst batch_size = Math.min(requested, 10);\nreturn [{ json: { batch_size, batch_size_requested: requested, batch_size_clamped: requested > 10, run_id: 'enrich-' + Date.now() } }];"
+      },
+      "id": "1720e24d-1325-5db0-ad3d-edff3115ed27",
+      "name": "1c. Normalize Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2928,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/companies/search",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ filterGroups: [{ filters: [{ propertyName: 'tam_status', operator: 'EQ', value: 'qualified' }, { propertyName: 'persona_enrichment_status', operator: 'NOT_HAS_PROPERTY' }] }], sorts: [{ propertyName: 'tam_first_seen', direction: 'ASCENDING' }], properties: ['tam_domain', 'name', 'domain', 'website', 'numberofemployees', 'linkedin_company_page', 'tam_status', 'persona_enrichment_status', 'score_icp'], limit: $('1c. Normalize Input').first().json.batch_size }) }}",
+        "options": {}
+      },
+      "id": "f8311a15-5290-5e9a-b4e2-65f23903dc0e",
+      "name": "2. HS Search qualified+pending",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -2208,
+        160
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "HubSpot private app (Bearer)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst r = $input.first().json.results || [];\nreturn r.map(c => ({ json: { hs_id: c.id, ...(c.properties || {}) } }));\n"
+      },
+      "id": "7ffd3db3-fea2-5fad-b583-24bcd8b743d4",
+      "name": "2b. Split companies → items",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2032,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst all = $input.all();\nconst companies = [];\nconst skipped = [];\n\nfunction deriveSlug(input) {\n  if (!input) return '';\n  return String(input).replace(/\\..*/, '').toLowerCase().replace(/[^a-z0-9-]/g, '');\n}\nfunction fromHubspotPage(linkedin) {\n  if (!linkedin) return '';\n  // Already a LinkedIn URL? extract slug to normalize\n  const match = String(linkedin).match(/linkedin\\.com\\/company\\/([^/?]+)/i);\n  if (match && match[1]) return 'https://www.linkedin.com/company/' + match[1].toLowerCase();\n  return '';\n}\n\nfor (const item of all) {\n  const j = item.json;\n  let url = fromHubspotPage(j.linkedin_company_page);\n  if (!url) {\n    const slug = deriveSlug(j.tam_domain) || deriveSlug(j.domain);\n    if (slug) url = 'https://www.linkedin.com/company/' + slug;\n  }\n  if (!url) {\n    skipped.push({ hs_id: j.hs_id, name: j.name });\n    continue;\n  }\n  companies.push({ url, hs_id: j.hs_id, name: j.name });\n}\n\nif (skipped.length) {\n  console.log('Skipped (no LinkedIn URL derivable): ' + skipped.length + ' — ' + skipped.map(c => c.name).join(', '));\n}\nif (!companies.length) return [];\nreturn [{ json: { companies, count: companies.length, skipped_count: skipped.length, skipped } }];\n"
+      },
+      "id": "d424fb1c-46ef-567b-a82d-101559d49fd2",
+      "name": "6.5 Aggregate companies for batch",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1872,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "Run actor and get dataset",
+        "actorId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "harvestapi~linkedin-company-employees"
+        },
+        "customBody": "={{ JSON.stringify({ companies: $('6.5 Aggregate companies for batch').first().json.companies.map(c => c.url), maxItems: 1500, maxItemsPerCompany: 100, locations: ['105015875'], companyBatchMode: 'all_at_once', profileScraperMode: 'Short ($4 per 1k)', jobTitles: [\"CRO\", \"Chief Revenue Officer\", \"Chief Sales Officer\", \"VP Sales\", \"VP of Sales\", \"Head of Sales\", \"Head of Revenue\", \"VP Revenue\", \"Sales Director\", \"Director of Sales\", \"Head of GTM\", \"Head of RevOps\", \"CEO\", \"Founder\", \"Co-Founder\", \"Account Executive\", \"Sales Manager\", \"Business Developer\", \"Growth Manager\"] }) }}"
+      },
+      "id": "6b9d5704-2404-5dc6-87c1-77b3b4d55eef",
+      "name": "7. Apify — Company Employees batch",
+      "type": "@apify/n8n-nodes-apify.apify",
+      "typeVersion": 1,
+      "position": [
+        -1696,
+        160
+      ],
+      "credentials": {
+        "apifyApi": {
+          "id": null,
+          "name": "Apify"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const targetRegexes = [\n  /\\bCRO\\b/i, /Chief\\s+Revenue\\s+Officer/i, /Chief\\s+Sales\\s+Officer/i,\n  /VP\\s+(?:of\\s+)?Sales/i, /VP\\s+(?:of\\s+)?Revenue/i,\n  /Head\\s+of\\s+Sales/i, /Head\\s+of\\s+Revenue/i, /Head\\s+of\\s+RevOps/i, /Head\\s+of\\s+GTM/i, /Head\\s+of\\s+Go[- ]?to[- ]?Market/i,\n  /Director\\s+of\\s+Sales/i, /\\bSales\\s+Director\\b/i,\n  /Director\\s+of\\s+RevOps/i, /VP\\s+(?:of\\s+)?RevOps/i, /Director\\s+of\\s+GTM/i, /VP\\s+(?:of\\s+)?GTM/i, /Revenue\\s+Operations\\s+Manager/i, /\\bRevOps\\s+Manager\\b/i,\n  /\\bCEO\\b/i, /\\bFounder\\b/i, /\\bCo-?founder\\b/i,\n];\nconst denyRegexes = [\n  /SDR\\s+Manager/i, /BDR\\s+Manager/i, /Sales\\s+Development\\s+Manager/i,\n  /Sales\\s+Operations\\s+Manager/i, /Sales\\s+Ops\\s+Manager/i, /Outbound\\s+Manager/i,\n  /\\bSenior\\s+AE\\b/i, /\\bSenior\\s+SDR\\b/i, /\\bSenior\\s+BDR\\b/i,\n];\nconst technicalRoleRegexes = [\n  /\\bCTO\\b/i, /Chief\\s+Technology\\s+Officer/i,\n  /\\bCPO\\b/i, /Chief\\s+Product\\s+Officer/i,\n  /\\bCFO\\b/i, /Chief\\s+Financial\\s+Officer/i,\n  /\\bCMO\\b/i, /Chief\\s+Marketing\\s+Officer/i,\n  /\\bCOO\\b/i, /Chief\\s+Operating\\s+Officer/i,\n  /VP\\s+(?:of\\s+)?Engineering/i, /VP\\s+(?:of\\s+)?Product(?!\\s+Marketing)/i,\n  /VP\\s+(?:of\\s+)?Tech/i, /VP\\s+(?:of\\s+)?Marketing/i, /VP\\s+(?:of\\s+)?Finance/i,\n  /VP\\s+(?:of\\s+)?People/i, /VP\\s+(?:of\\s+)?HR/i, /VP\\s+(?:of\\s+)?Operations/i,\n  /Head\\s+of\\s+(?:Engineering|Product|Tech|Marketing|Finance|People|HR|Operations|Design)/i,\n  /Director\\s+of\\s+(?:Engineering|Product|Tech|Marketing|Finance|People|HR|Operations|Design)/i,\n];\nconst frRegex = /(France|Paris|Lyon|Marseille|Bordeaux|Toulouse|Lille|Nantes|Rennes|Strasbourg|Nice|Grenoble|Montpellier|Sophia[- ]?Antipolis|Aix[- ]?en[- ]?Provence|Île[- ]?de[- ]?France|Hauts[- ]?de[- ]?France)/i;\n\nfunction norm(s) { return String(s || '').toLowerCase().trim(); }\nfunction getCurrentPos(j) {\n  return (j.currentPositions && j.currentPositions[0]) || (j.currentPosition && j.currentPosition[0]) || {};\n}\nfunction getTitleHaystack(j) {\n  const cp = getCurrentPos(j);\n  const parts = [j.title, j.headline, cp.position, cp.title].filter(Boolean);\n  return parts.join(' || ');\n}\nfunction getLocation(j) {\n  if (typeof j.location === 'string') return j.location;\n  return j.location?.linkedinText || j.location?.parsed?.text || j.locationName || '';\n}\nfunction getCountryCode(j) {\n  if (typeof j.location === 'object') {\n    return (j.location?.countryCode || j.location?.parsed?.countryCode || '').toUpperCase();\n  }\n  return '';\n}\nfunction getCompanyName(j) {\n  const cp = getCurrentPos(j);\n  return norm(cp.companyName || cp.company || j.currentCompany?.name);\n}\nfunction getCompanyUrl(j) {\n  const cp = getCurrentPos(j);\n  return norm(cp.companyLinkedinUrl || cp.companyUrl || j.currentCompany?.linkedinUrl || j.currentCompany?.url);\n}\nfunction extractSlug(url) {\n  return (String(url).split('/company/')[1] || '').split('/')[0].split('?')[0];\n}\n\nfunction isSalesTitle(haystack) {\n  return targetRegexes.some(r => r.test(haystack))\n      && !denyRegexes.some(r => r.test(haystack))\n      && !technicalRoleRegexes.some(r => r.test(haystack));\n}\n\nconst out = [];\nconst seen = new Set();\nconst companies = $('6.5 Aggregate companies for batch').first().json.companies;\n\nlet dropped_left_company = 0;\nlet dropped_no_title = 0;\nlet dropped_not_sales = 0;\nlet dropped_not_fr = 0;\n\nfor (const item of $input.all()) {\n  const j = item.json;\n  if (j._company_has_concurrence === true) continue;\n\n  const titleHaystack = getTitleHaystack(j);\n  if (!titleHaystack) { dropped_no_title++; continue; }\n\n  const loc = getLocation(j);\n  const cc = getCountryCode(j);\n  const linkedinUrl = j.linkedinUrl || j.profileUrl || '';\n  if (!linkedinUrl || seen.has(linkedinUrl)) continue;\n  if (!isSalesTitle(titleHaystack)) { dropped_not_sales++; continue; }\n\n  const isFR = (loc && frRegex.test(loc)) || cc === 'FR';\n  if (!isFR) { dropped_not_fr++; continue; }\n\n  // Match employee back to a batch company. Try company name first (more reliable\n  // when the actor returns numeric IDs in companyLinkedinUrl), fallback to slug.\n  const empCoName = getCompanyName(j);\n  const empCoSlug = extractSlug(getCompanyUrl(j));\n  const matched = companies.find(c => {\n    const cName = norm(c.name);\n    const cSlug = extractSlug(c.url);\n    if (cName && empCoName && (cName === empCoName || cName.includes(empCoName) || empCoName.includes(cName))) return true;\n    if (cSlug && empCoSlug && cSlug === empCoSlug) return true;\n    return false;\n  });\n\n  if (!matched) {\n    dropped_left_company++;\n    continue;\n  }\n\n  seen.add(linkedinUrl);\n  out.push({ json: { ...j, linkedinUrl, _company_hs_id: matched.hs_id, _company_name: matched.name } });\n}\n\nconsole.log('Filter stats — dropped: no_title=' + dropped_no_title + ', not_sales=' + dropped_not_sales + ', not_fr=' + dropped_not_fr + ', left_company=' + dropped_left_company + ' | passed=' + out.length);\n\nreturn out.slice(0, 200);"
+      },
+      "id": "8003397c-a962-5ab4-9d54-464632106e8d",
+      "name": "8. Filter title (FR + target titles)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -416,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 1000, temperature: 0, messages: [{ role: 'user', content: [{ type: 'text', text: \"You are the persona qualification agent of an outbound engine. Target: sales decision-makers (with budget) at B2B SaaS companies in France, the market of this configuration.\\n\\nRULE ZERO: DO NOT INVENT RULES.\\n- The list of hard disqualifications is closed (5 numbered items).\\n- If is_persona is false because of a disqualification, cite its number (example: \\\"Disqualification #5: not a sales decision-maker\\\").\\n- If you cannot cite a number from 1 to 5, is_persona depends ONLY on score >= 50.\\n- A condition that is not listed never disqualifies. It only gives 0 or few points.\\n- Before writing the JSON, check that score = tier_pts + tenure_pts + concurrence_pts + signals_pts. If not, recompute.\\n\\nSCORING RUBRIC\\n\\nA. TITLE FIT (one tier only, max 40)\\n- T1 = 40: CRO, Chief Revenue Officer, Chief Sales Officer, VP Sales, VP of Sales, Head of Sales, VP Revenue, Head of Revenue. T1 always has priority: if a company has both a Head of Sales and a Head of GTM, score the Head of GTM as T2.\\n- T2 = 30: Director of Sales, Sales Director, Head of GTM, Head of Go-to-Market, Director of GTM, VP of GTM\\n- T3 = 25: Head of RevOps, Director of RevOps, VP of RevOps, Revenue Operations Manager, RevOps Manager\\n- T4 = 5: CEO, Founder, Co-founder, ONLY IF all of these are true:\\n  (a) the company has fewer than 50 employees\\n  (b) there is no T1, T2 or T3 in the team\\n  (c) the title does not include a technical or non-sales role (CTO, CPO, CFO, CMO, COO, VP or Head of Engineering, Product, Tech, Marketing, People, HR, Finance, Operations)\\n  A \\\"Co-founder & CTO\\\" is not a sales decision-maker: the technical role wins over the founder status. Score 0 and disqualification #5.\\n- No match (SDR or BDR manager, sales ops manager, outbound manager, senior or regular AE, SDR, BDR, other individual contributors) = 0 points and disqualification #5.\\n\\nB. TENURE IN CURRENT ROLE (max 20). Read currentPositions[0].dateRange or similar and count the months in the current role.\\n- 20: 0 to 6 months (a newly hired leader is open to new approaches)\\n- 10: 6 to 12 months\\n- 0: 12 months or more, or unknown\\n\\nC. NO IN-HOUSE GTM ENGINEER (max 15). Check the company_employees list in INPUT for these titles:\\nGTM Engineer, GTM Specialist, RevOps Engineer, Revenue Operations Engineer, Sales Ops Engineer, Sales Operations Engineer, Growth Engineer, Growth Hacker (automation focus), Growth Manager, Growth Lead, Automation Engineer, Marketing Automation Lead.\\n- 15: none found\\n- 0: one or more found (the need is already covered in-house)\\n\\nD. AUTOMATION AND AI SIGNALS in posts, headline or about (max 25). +5 per LITERAL signal (max 5):\\n- \\\"AI agent\\\", \\\"AI in sales\\\", \\\"generative AI\\\"\\n- \\\"automation\\\", \\\"n8n\\\", \\\"Zapier\\\", \\\"Make.com\\\", \\\"Workato\\\", \\\"Parabola\\\"\\n- \\\"GTM stack\\\", \\\"GTM tooling\\\", \\\"sales tech stack\\\"\\n- \\\"AI sales\\\", \\\"sales AI\\\", \\\"RevOps AI\\\"\\n- \\\"build vs buy\\\", \\\"in-house tooling\\\", \\\"custom automation\\\"\\n\\nSCORE = A + B + C + D (integer, max 100). No arbitrary bonus.\\n\\nHARD DISQUALIFICATIONS (closed list, 5 items). If you disqualify, cite a number from 1 to 5. Otherwise do NOT disqualify.\\n#1. Title: investor, advisor, board member, VC, angel, mentor\\n#2. Title: recruiter, talent acquisition (unless explicitly combined with a T1 or T2 role, for example \\\"Head of Sales & Recruiting\\\")\\n#3. Left the company: \\\"Former\\\", \\\"Past at\\\", or an end date on the current role\\n#4. Location outside France: the location mentions neither France nor a French city or region (Paris, Lyon, Marseille, Bordeaux, Toulouse, Lille, Nantes, Rennes, Strasbourg, Nice, Grenoble, Montpellier, Sophia Antipolis, Aix-en-Provence, Ile-de-France, Hauts-de-France)\\n#5. Not a decision-maker (no T1, T2, T3 or T4 match): SDR or BDR manager, sales ops manager, outbound manager, senior or regular AE, SDR, other individual contributors without budget\\n\\nELIGIBILITY: is_persona = true ONLY IF:\\n1. score >= 50 (strict sum A + B + C + D)\\n2. AND tier is 1, 2, 3 or 4\\n3. AND no hard disqualification applies\\n\\nOUTPUT: STRICT JSON\\n- ONE JSON block in your answer. Never two.\\n- No text before or after the JSON. No prose. No markdown.\\n- If you detect a math error, rewrite the single JSON block.\\n\\nExact format:\\n{\\\"is_persona\\\": bool, \\\"tier\\\": 1|2|3|4|null, \\\"score\\\": 0-100, \\\"score_breakdown\\\": {\\\"tier_pts\\\": N, \\\"tenure_pts\\\": N, \\\"concurrence_pts\\\": N, \\\"signals_pts\\\": N}, \\\"reason\\\": \\\"<tier T<N> X pts> + <tenure Y pts> + <in-house Z pts> + <signals W pts> = <total>. Disqualification: <#N or none>\\\", \\\"rice_preview\\\": \\\"<one sentence: likely motivation and communication style, to confirm in conversation>\\\", \\\"disqualif_number\\\": \\\"1-5 or null\\\", \\\"tenure_months\\\": N}\", cache_control: { type: 'ephemeral' } }, { type: 'text', text: '\\n\\nINPUT:\\n- profile_data: ' + ($json._profileForHaiku || '{}') + '\\n- company_employees (for criterion C): ' + ($json._employeesJson || '[]') }] }] }) }}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 250
+            }
+          },
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "id": "a168b9d1-94bd-503c-a147-ed11ee74bb99",
+      "name": "10. Qualify + Score Persona (Haiku)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        208,
+        208
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "Anthropic API (x-api-key)"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "\nfunction findLastValidJson(text) {\n  if (!text) return null;\n  const blocks = []; let depth = 0, start = -1;\n  for (let i = 0; i < text.length; i++) {\n    if (text[i] === '{') { if (depth === 0) start = i; depth++; }\n    else if (text[i] === '}') { depth--; if (depth === 0 && start >= 0) { blocks.push([start, i + 1]); start = -1; } }\n  }\n  for (let i = blocks.length - 1; i >= 0; i--) {\n    try {\n      const obj = JSON.parse(text.substring(blocks[i][0], blocks[i][1]));\n      if (obj && typeof obj === 'object' && 'is_persona' in obj) return obj;\n    } catch (e) {}\n  }\n  for (let i = blocks.length - 1; i >= 0; i--) {\n    try { return JSON.parse(text.substring(blocks[i][0], blocks[i][1])); } catch (e) {}\n  }\n  return null;\n}\nfunction clamp(n, min, max) { const x = typeof n === 'number' ? n : 0; return Math.max(min, Math.min(max, x)); }\n\nconst all = $input.all();\nconst out = [];\nfor (let i = 0; i < all.length; i++) {\n  const item = all[i];\n  const t = item.json?.content?.[0]?.text || '';\n  const v = findLastValidJson(t) || {};\n  const orig = $('8. Filter title (FR + target titles)').itemMatching(i)?.json || {};\n\n  const bk = v.score_breakdown || {};\n  const tier_pts = clamp(bk.tier_pts, 0, 40);\n  const tenure_pts = clamp(bk.tenure_pts, 0, 20);\n  const concurrence_pts = clamp(bk.concurrence_pts, 0, 15);\n  const signals_pts = clamp(bk.signals_pts, 0, 25);\n  const sum = tier_pts + tenure_pts + concurrence_pts + signals_pts;\n\n  const disqNum = v.disqualif_number && /^[1-5]$/.test(String(v.disqualif_number).trim()) ? String(v.disqualif_number).trim() : null;\n  const tier = (typeof v.tier === 'number' && v.tier >= 1 && v.tier <= 4) ? v.tier : null;\n  const score = disqNum ? 0 : sum;\n  const is_persona = !disqNum && score >= 50 && tier !== null;\n\n  // Doubt criteria for Sonnet review (V2)\n  // (a) Disqualif #1, #2, #3 cited (Haiku safety bias on investor/recruiter/left-company)\n  // (b) Score 40-55 sans disqualif (close to threshold)\n  // (c) tier_pts <= 0 mais headline contient 'Sales' / 'Revenue' (potentielle erreur classification tier)\n  const headline = String(orig.headline || orig.title || '').toLowerCase();\n  const headlineHasSalesKeyword = /sales|revenue|cro|chief|vp|director|head of/i.test(headline);\n  const _doubt = (\n    disqNum === '1' ||\n    disqNum === '2' ||\n    disqNum === '3' ||\n    (!disqNum && score >= 40 && score <= 55) ||\n    (tier_pts <= 0 && headlineHasSalesKeyword)\n  );\n\n  const tier_keys = { 1: '1_cro_vp_sales', 2: '2_director_of_sales', 3: '3_revops_lead', 4: '4_ceo_fallback' };\n\n  out.push({\n    json: {\n      ...orig,\n      _verdict: {\n        is_persona, score, tier,\n        tier_key: tier ? tier_keys[tier] : '',\n        score_breakdown: { tier_pts, tenure_pts, concurrence_pts, signals_pts },\n        reason: v.reason || '',\n        rice_preview: v.rice_preview || '',\n        disqualif_number: disqNum,\n        tenure_months: typeof v.tenure_months === 'number' ? v.tenure_months : null,\n        _doubt,\n        _audit: {\n          haiku_score: typeof v.score === 'number' ? v.score : null,\n          haiku_is_persona: v.is_persona === true,\n          haiku_breakdown: bk,\n          breakdown_sum_no_disq: sum,\n        },\n      },\n    },\n  });\n}\nreturn out;\n"
+      },
+      "id": "86903c4e-a0d2-5a1a-8ad9-6ac3ae7ceea9",
+      "name": "10.5 Parse persona verdict",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        400,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "is-persona",
+              "leftValue": "={{ $json._verdict?.is_persona === true }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "3a697f6c-cbff-56bc-815e-bbe834d0c65a",
+      "name": "11. IF persona qualified",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1824,
+        256
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_N8N_HOST/webhook/brief-pipeline",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  url: $('10.96 T1 priority + T4 fallback override').item.json.linkedinUrl,\n  triggered_by: 'flow2-auto',\n  user_id: 'flow2',\n  channel_id: 'YOUR_SLACK_CHANNEL_ID_BRIEFS',\n  flow2_score: $('10.96 T1 priority + T4 fallback override').item.json._verdict?.score || 0,\n  flow2_tier: $('10.96 T1 priority + T4 fallback override').item.json._verdict?.tier_key || '',\n  flow2_reason: $('10.96 T1 priority + T4 fallback override').item.json._verdict?.reason || '',\n  flow2_t4_promoted: $('10.96 T1 priority + T4 fallback override').item.json._verdict?._t4_fallback_promoted === true,\n  flow2_sales_count: $('10.96 T1 priority + T4 fallback override').item.json._company_sales_count || {},\n  persona_name: ($('10.96 T1 priority + T4 fallback override').item.json.firstName || '') + ' ' + ($('10.96 T1 priority + T4 fallback override').item.json.lastName || ''),\n  persona_title: $('10.96 T1 priority + T4 fallback override').item.json.headline || ($('10.96 T1 priority + T4 fallback override').item.json.currentPositions?.[0]?.title) || '',\n  persona_company: $('10.96 T1 priority + T4 fallback override').item.json._company_name || '',\n  persona_data: {\n    firstName: $('10.96 T1 priority + T4 fallback override').item.json.firstName || '',\n    lastName: $('10.96 T1 priority + T4 fallback override').item.json.lastName || '',\n    summary: $('10.96 T1 priority + T4 fallback override').item.json.summary || '',\n    headline: $('10.96 T1 priority + T4 fallback override').item.json.headline || ($('10.96 T1 priority + T4 fallback override').item.json.currentPositions?.[0]?.title) || '',\n    currentPosition: $('10.96 T1 priority + T4 fallback override').item.json.currentPositions || [],\n    location: $('10.96 T1 priority + T4 fallback override').item.json.location || {},\n    pictureUrl: $('10.96 T1 priority + T4 fallback override').item.json.pictureUrl || '',\n    linkedinUrl: $('10.96 T1 priority + T4 fallback override').item.json.linkedinUrl || ''\n  }\n}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "id": "1930a6ab-0c37-51fa-94e3-ae114d7c2506",
+      "name": "13. Auto-trigger Flow 1 brief",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2080,
+        128
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "\nif ($itemIndex !== 0) return [];\nconst verdicts = $('10.95 Merge confident + reviewed').all() || [];\nconst total = verdicts.length;\nconst aggInfo = $('6.5 Aggregate companies for batch').first().json;\nconst companies = aggInfo.companies || [];\nconst skipped_count = aggInfo.skipped_count || 0;\nlet concurrence_count = 0; try { concurrence_count = ($('7.6 Extract concurrence companies').all() || []).reduce((acc, item) => acc + ((item.json?.body?.inputs || []).length), 0); } catch(e) {}\nlet qualified = 0, disqualified = 0, sonnetReviewed = 0;\nconst lines = verdicts.map(v => {\n  const j = v.json;\n  const ver = j._verdict || {};\n  if (ver.is_persona) qualified++; else disqualified++;\n  if (ver._reviewed_by === 'sonnet') sonnetReviewed++;\n  const bk = ver.score_breakdown || {};\n  const breakdownStr = (typeof bk.tier_pts === 'number')\n    ? ' [T:' + (bk.tier_pts||0) + ' Tn:' + (bk.tenure_pts||0) + ' Cn:' + (bk.concurrence_pts||0) + ' Sg:' + (bk.signals_pts||0) + ']'\n    : '';\n  const sonnetTag = ver._reviewed_by === 'sonnet' ? ' 🤖' : '';\n  const tier = ver.tier_key || '?';\n  const cp = (j.currentPositions && j.currentPositions[0]) || {};\n  const title = (j.title || j.headline || cp.position || '?').slice(0, 70);\n  const compName = j._company_name || '?';\n  return '   ' + (ver.is_persona ? '✅' : '❌') + ' *' + (j.firstName || '') + ' ' + (j.lastName || '') + '* — _' + title + '_ — ' + compName + ' (score ' + (ver.score || 0) + ', ' + tier + ')' + breakdownStr + sonnetTag + '\\n      _' + (ver.reason || '').slice(0, 180) + '_';\n}).join('\\n');\nconst summary = qualified === 0\n  ? '🛑 *Aucun persona qualifié — Flow 2 terminé.*\\n_' + total + ' personas analysés. Lance Flow 3 pour ingérer plus de TAM ou ajuste rubric._'\n  : '✅ *' + qualified + '/' + total + ' persona' + (qualified > 1 ? 's qualifiés' : ' qualifié') + '*\\n_Briefs Flow 1 déclenchés en parallèle (1 par persona qualifié)._';\nconst sonnetNote = sonnetReviewed > 0 ? '\\n_🤖 ' + sonnetReviewed + ' verdict(s) re-jugé(s) Sonnet (borderlines)_' : '';\nconst concurrenceNote = concurrence_count > 0 ? '\\n_⚠️ ' + concurrence_count + ' compan' + (concurrence_count > 1 ? 'ies disqualifiées' : 'y disqualifiée') + ' (concurrence interne GTM/RevOps)_' : '';\nconst skippedNote = skipped_count > 0 ? '\\n_⏭️ ' + skipped_count + ' compan' + (skipped_count > 1 ? 'ies skippées' : 'y skippée') + ' (URL LinkedIn non dérivable)_' : '';\nconst companiesHeader = companies.length > 0 ? '\\n*🏢 Companies de ce batch (' + companies.length + ') :*\\n' + companies.map(c => '   • ' + c.name).join('\\n') + '\\n' : '';\nconst text = '📊 *Flow 2 — Persona Enricher*\\n' + total + ' persona' + (total > 1 ? 's analysés' : ' analysé') + sonnetNote + concurrenceNote + skippedNote + companiesHeader + '\\n_Légende: T=Tier, Tn=Tenure, Cn=Concurrence, Sg=Signals (sur 100). 🤖 = re-jugé Sonnet_\\n\\n' + lines + '\\n\\n' + summary;\nreturn [{ json: { text } }];\n"
+      },
+      "id": "3b1ceeda-1dae-5c43-9fe5-2429c164a76a",
+      "name": "E_format_done",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2512,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_SLACK_CHANNEL_ID_MONITORING"
+        },
+        "text": "={{ $json.text }}",
+        "otherOptions": {}
+      },
+      "id": "ec69cad8-9c6b-5104-bb86-3fdf98b30f0e",
+      "name": "E_slack_done",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        2704,
+        304
+      ],
+      "webhookId": "e59bc74b-949b-5b10-a7ab-a4e4d4f6946a",
+      "credentials": {
+        "slackApi": {
+          "id": null,
+          "name": "Slack bot"
+        }
+      },
+      "executeOnce": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "flow2-persona-enricher",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "48da351b-e9f6-55f1-82be-3f9991c8b43d",
+      "name": "1w. Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -3120,
+        -80
+      ],
+      "webhookId": "88d9ca48-0654-53b9-8f8f-0c5ceeca5ef9"
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "ok",
+        "options": {}
+      },
+      "id": "ea674955-6499-5704-b26f-e295f791068d",
+      "name": "1r. Respond OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        -2944,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_SLACK_CHANNEL_ID_MONITORING"
+        },
+        "text": "={{ '✅ *Flow 2 — Persona Enricher* finished\\n*Run:* ' + $json.run_id + '\\n*Batch size:* ' + $json.batch_size }}",
+        "otherOptions": {}
+      },
+      "id": "59154270-6206-59f9-bdc6-5cdeff741f8b",
+      "name": "M1. Slack — Flow 2 finished",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        -2736,
+        352
+      ],
+      "webhookId": "3e5eedc0-d018-5b7d-9346-ad2c3c3cde02",
+      "credentials": {
+        "slackApi": {
+          "id": null,
+          "name": "Slack bot"
+        }
+      },
+      "executeOnce": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_SLACK_CHANNEL_ID_MONITORING"
+        },
+        "text": "={{ (() => { const cs = $('6.5 Aggregate companies for batch').first().json.companies || []; const skipped = $('6.5 Aggregate companies for batch').first().json.skipped_count || 0; const skippedNames = ($('6.5 Aggregate companies for batch').first().json.skipped || []).map(s => s.name).join(', '); return '📥 *Flow 2 — Companies fetched*\\n*' + cs.length + ' companies* à scraper :\\n' + cs.map(c => '   • ' + c.name + ' (' + c.url + ')').join('\\n') + (skipped > 0 ? '\\n\\n_⚠️ ' + skipped + ' skippées (URL non dérivable: ' + skippedNames + ')_' : '') + '\\n\\n_Lancement scrape Apify employees..._'; })() }}",
+        "otherOptions": {}
+      },
+      "id": "06bc53d2-9481-560b-bc63-6625b81a98d7",
+      "name": "M2. Slack — companies fetched",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        -1888,
+        -64
+      ],
+      "webhookId": "682b0345-03d3-5261-808f-0d8f83a057f7",
+      "credentials": {
+        "slackApi": {
+          "id": null,
+          "name": "Slack bot"
+        }
+      },
+      "executeOnce": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_SLACK_CHANNEL_ID_MONITORING"
+        },
+        "text": "={{ (() => { const candidates = $('8. Filter title (FR + target titles)').all(); const total_emp = ($('7. Apify — Company Employees batch').all() || []).length; return '🎯 *Flow 2 — Title filter done*\\n*' + candidates.length + ' candidates* (decision-makers FR) sur ' + total_emp + ' employés scrapés\\n\\n' + candidates.slice(0, 15).map(c => { const j = c.json; const cp = (j.currentPosition && j.currentPosition[0]) || {}; const title = j.title || j.headline || cp.position || '?'; const loc = j.location?.linkedinText || j.location || '?'; return '   • *' + (j.firstName || '') + ' ' + (j.lastName || '') + '* — _' + (title.slice(0, 80)) + '_ — ' + (loc.slice(0, 30)) + ' (' + (j._company_name || '?') + ')'; }).join('\\n') + (candidates.length > 15 ? '\\n   _... +' + (candidates.length - 15) + ' more_' : '') + '\\n\\n_Lancement scrape full profile..._'; })() }}",
+        "otherOptions": {}
+      },
+      "id": "fb8e6756-3c9e-5c3b-b869-2fd6cc3619b8",
+      "name": "M3. Slack — title filter done",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        -240,
+        0
+      ],
+      "webhookId": "11eb23bb-7b67-5838-b7e4-ead37fc9eb0d",
+      "credentials": {
+        "slackApi": {
+          "id": null,
+          "name": "Slack bot"
+        }
+      },
+      "executeOnce": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_SLACK_CHANNEL_ID_MONITORING"
+        },
+        "text": "={{ (() => { const all = $('10.95 Merge confident + reviewed').all() || []; let q = 0, d = 0, sr = 0; const lines = []; for (const v of all) { const j = v.json; const ver = j._verdict || {}; const isQual = ver.is_persona === true; if (isQual) q++; else d++; if (ver._reviewed_by === 'sonnet') sr++; const cp = (j.currentPosition && j.currentPosition[0]) || {}; const title = (j.headline || cp.position || '?').slice(0, 60); const compName = j._company_name || '?'; const tier = ver.tier_key || '-'; const bk = ver.score_breakdown || {}; const breakdownStr = (typeof bk.tier_pts === 'number') ? ' [T:' + (bk.tier_pts||0) + ' Tn:' + (bk.tenure_pts||0) + ' Cn:' + (bk.concurrence_pts||0) + ' Sg:' + (bk.signals_pts||0) + ']' : ''; const sonnetTag = ver._reviewed_by === 'sonnet' ? ' 🤖' : ''; const disqTag = ver.disqualif_number ? ' [#' + ver.disqualif_number + ']' : ''; lines.push('   ' + (isQual ? '✅' : '❌') + ' *' + (j.firstName || '') + ' ' + (j.lastName || '') + '* — _' + title + '_ — ' + compName + ' — *' + (ver.score || 0) + ' pts* (' + tier + ')' + breakdownStr + disqTag + sonnetTag); } return '✅ *Flow 2 — Scoring done*\\n*Total:* ' + all.length + ' personas\\n*✅ Qualifiés:* ' + q + '\\n*❌ Disqualifiés:* ' + d + (sr > 0 ? '\\n*🤖 Re-jugés Sonnet:* ' + sr : '') + '\\n\\n_Légende: T=Tier(40), Tn=Tenure(20), Cn=Concurrence(15), Sg=Signals(25). #N=disqualif numéro_\\n\\n' + lines.join('\\n') + '\\n\\n_Push HubSpot Contacts + Flow 1 brief en cours pour les ' + q + ' qualifiés..._'; })() }}",
+        "otherOptions": {}
+      },
+      "id": "7e8ec33c-3d75-5ba5-a9c9-a62a34d8969f",
+      "name": "M5. Slack — scoring done",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        544,
+        464
+      ],
+      "webhookId": "3e30ce1d-55df-5049-aa1e-7aeff778e679",
+      "credentials": {
+        "slackApi": {
+          "id": null,
+          "name": "Slack bot"
+        }
+      },
+      "executeOnce": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const all = $input.all();\nconst concurrenceTitles = [\n  /\\bGTM\\s+Engineer\\b/i, /\\bGTM\\s+Specialist\\b/i,\n  /\\bRevOps\\s+Engineer\\b/i, /Revenue\\s+Operations\\s+Engineer/i,\n  /Sales\\s+Ops\\s+Engineer/i, /Sales\\s+Operations\\s+Engineer/i,\n  /\\bGrowth\\s+Engineer\\b/i, /\\bGrowth\\s+Manager\\b/i, /\\bGrowth\\s+Lead\\b/i, /\\bAutomation\\s+Engineer\\b/i,\n  /Marketing\\s+Automation\\s+(Lead|Manager|Engineer)/i,\n];\nconst sdrPattern = /\\bSDR\\b|Sales\\s+Development\\s+Representative|Sales\\s+Development(?!\\s+(Director|Manager|Lead|Head))/i;\nconst bdrPattern = /\\bBDR\\b|Business\\s+Development\\s+Representative/i;\nconst csmPattern = /\\bCSM\\b|Customer\\s+Success\\s+Manager|Customer\\s+Success\\s+Specialist|Customer\\s+Success\\s+Associate|Customer\\s+Success\\s+Representative/i;\nconst aePattern = /\\bAE\\b|Account\\s+Executive/i;\n\nfunction isConcurrence(title) {\n  if (!title) return false;\n  return concurrenceTitles.some(r => r.test(title));\n}\nfunction getCompanyUrl(j) {\n  const cp = (j.currentPositions && j.currentPositions[0]) || {};\n  return (cp.companyLinkedinUrl || cp.companyUrl || j.currentCompany?.linkedinUrl || j.currentCompany?.url || '').toLowerCase();\n}\nfunction extractSlug(url) {\n  return (url.split('/company/')[1] || '').split('/')[0].split('?')[0];\n}\nfunction getTitle(j) {\n  return [j.title, j.headline, j.currentPositions?.[0]?.position, j.currentPositions?.[0]?.title].filter(Boolean).join(' || ');\n}\n\nconst companies = $('6.5 Aggregate companies for batch').first().json.companies || [];\nconst compByUrl = {};\nfor (const c of companies) {\n  const slug = extractSlug(String(c.url || '').toLowerCase());\n  if (slug) compByUrl[slug] = c;\n}\n\nconst concurrenceCompanies = new Set();\nconst salesCountByCompany = {};\n\nfor (const item of all) {\n  const j = item.json;\n  const title = getTitle(j);\n  const slug = extractSlug(getCompanyUrl(j));\n  if (!slug || !compByUrl[slug]) continue;\n\n  if (!salesCountByCompany[slug]) {\n    salesCountByCompany[slug] = { sdr: 0, bdr: 0, csm: 0, ae: 0, total_employees_scraped: 0 };\n  }\n  salesCountByCompany[slug].total_employees_scraped++;\n\n  if (isConcurrence(title)) concurrenceCompanies.add(slug);\n  if (sdrPattern.test(title)) salesCountByCompany[slug].sdr++;\n  else if (bdrPattern.test(title)) salesCountByCompany[slug].bdr++;\n  if (csmPattern.test(title)) salesCountByCompany[slug].csm++;\n  if (aePattern.test(title) && !sdrPattern.test(title) && !bdrPattern.test(title)) salesCountByCompany[slug].ae++;\n}\n\nconst out = [];\nfor (const item of all) {\n  const j = item.json;\n  const slug = extractSlug(getCompanyUrl(j));\n  const sc = salesCountByCompany[slug] || { sdr: 0, bdr: 0, csm: 0, ae: 0, total_employees_scraped: 0 };\n  out.push({\n    json: {\n      ...j,\n      _company_has_concurrence: concurrenceCompanies.has(slug),\n      _company_slug: slug,\n      _company_sales_count: sc,\n    }\n  });\n}\nconsole.log('Concurrence: ' + concurrenceCompanies.size + ' | Sales counts: ' + JSON.stringify(salesCountByCompany));\nreturn out;"
+      },
+      "id": "eed0ffeb-f066-581a-8ee5-c83110a4425c",
+      "name": "7.5 Detect concurrence interne",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -608,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst companies = $('6.5 Aggregate companies for batch').first().json.companies || [];\nconst all = $input.all();\nconst concurrenceSlugs = new Set();\nfor (const item of all) {\n  if (item.json._company_has_concurrence && item.json._company_slug) {\n    concurrenceSlugs.add(item.json._company_slug);\n  }\n}\nconst inputs = [];\nfor (const c of companies) {\n  const slug = ((c.url || '').toLowerCase().split('/company/')[1] || '').split('/')[0];\n  if (concurrenceSlugs.has(slug) && c.hs_id) {\n    inputs.push({\n      id: c.hs_id,\n      properties: {\n        tam_status: 'disqualified',\n        disqualif_reason: 'Disqualif #6 (Flow 2): GTM Engineer / RevOps / Sales Ops / Growth / Automation Engineer détecté en interne dans la company. Pas de besoin pour notre offre.',\n        qualified_reason: '',\n        score_icp: 0,\n        persona_enrichment_status: 'done',\n      },\n    });\n  }\n}\nif (!inputs.length) return [];\nreturn [{ json: { body: { inputs } } }];\n"
+      },
+      "id": "9ab6224f-0924-54c7-9752-40a17380c6d7",
+      "name": "7.6 Extract concurrence companies",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -432,
+        432
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/companies/batch/update",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 2000
+            }
+          }
+        }
+      },
+      "id": "69498502-6387-524a-a75c-3a6cf4f9b178",
+      "name": "7.7 PATCH HS Company disqualif (concurrence)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -240,
+        432
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "HubSpot private app (Bearer)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_SLACK_CHANNEL_ID_MONITORING"
+        },
+        "text": "={{ '⚠️ *Flow 2:* ' + (($json.body && $json.body.inputs) ? $json.body.inputs.length : 0) + ' compan' + ((($json.body && $json.body.inputs) ? $json.body.inputs.length : 0) > 1 ? 'ies disqualifiées' : 'y disqualifiée') + ' (concurrence interne GTM/RevOps Engineer détectée)' }}",
+        "otherOptions": {}
+      },
+      "id": "03ea5b4c-9a0c-56bd-8121-c0759eaa0577",
+      "name": "M_concurrence Slack",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        -48,
+        464
+      ],
+      "webhookId": "be5ee904-0b43-5094-a79f-60bd46942d5b",
+      "credentials": {
+        "slackApi": {
+          "id": null,
+          "name": "Slack bot"
+        }
+      },
+      "executeOnce": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "is-doubt",
+              "leftValue": "={{ $json._verdict._doubt }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "3fe10d21-44e6-5f18-828d-cb1973093ec1",
+      "name": "10.7 IF doubt → Sonnet",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        592,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 1500, temperature: 0, messages: [{ role: 'user', content: [{ type: 'text', text: \"You are the persona qualification agent of an outbound engine. Target: sales decision-makers (with budget) at B2B SaaS companies in France, the market of this configuration.\\n\\nRULE ZERO: DO NOT INVENT RULES.\\n- The list of hard disqualifications is closed (5 numbered items).\\n- If is_persona is false because of a disqualification, cite its number (example: \\\"Disqualification #5: not a sales decision-maker\\\").\\n- If you cannot cite a number from 1 to 5, is_persona depends ONLY on score >= 50.\\n- A condition that is not listed never disqualifies. It only gives 0 or few points.\\n- Before writing the JSON, check that score = tier_pts + tenure_pts + concurrence_pts + signals_pts. If not, recompute.\\n\\nSCORING RUBRIC\\n\\nA. TITLE FIT (one tier only, max 40)\\n- T1 = 40: CRO, Chief Revenue Officer, Chief Sales Officer, VP Sales, VP of Sales, Head of Sales, VP Revenue, Head of Revenue. T1 always has priority: if a company has both a Head of Sales and a Head of GTM, score the Head of GTM as T2.\\n- T2 = 30: Director of Sales, Sales Director, Head of GTM, Head of Go-to-Market, Director of GTM, VP of GTM\\n- T3 = 25: Head of RevOps, Director of RevOps, VP of RevOps, Revenue Operations Manager, RevOps Manager\\n- T4 = 5: CEO, Founder, Co-founder, ONLY IF all of these are true:\\n  (a) the company has fewer than 50 employees\\n  (b) there is no T1, T2 or T3 in the team\\n  (c) the title does not include a technical or non-sales role (CTO, CPO, CFO, CMO, COO, VP or Head of Engineering, Product, Tech, Marketing, People, HR, Finance, Operations)\\n  A \\\"Co-founder & CTO\\\" is not a sales decision-maker: the technical role wins over the founder status. Score 0 and disqualification #5.\\n- No match (SDR or BDR manager, sales ops manager, outbound manager, senior or regular AE, SDR, BDR, other individual contributors) = 0 points and disqualification #5.\\n\\nB. TENURE IN CURRENT ROLE (max 20). Read currentPositions[0].dateRange or similar and count the months in the current role.\\n- 20: 0 to 6 months (a newly hired leader is open to new approaches)\\n- 10: 6 to 12 months\\n- 0: 12 months or more, or unknown\\n\\nC. NO IN-HOUSE GTM ENGINEER (max 15). Check the company_employees list in INPUT for these titles:\\nGTM Engineer, GTM Specialist, RevOps Engineer, Revenue Operations Engineer, Sales Ops Engineer, Sales Operations Engineer, Growth Engineer, Growth Hacker (automation focus), Growth Manager, Growth Lead, Automation Engineer, Marketing Automation Lead.\\n- 15: none found\\n- 0: one or more found (the need is already covered in-house)\\n\\nD. AUTOMATION AND AI SIGNALS in posts, headline or about (max 25). +5 per LITERAL signal (max 5):\\n- \\\"AI agent\\\", \\\"AI in sales\\\", \\\"generative AI\\\"\\n- \\\"automation\\\", \\\"n8n\\\", \\\"Zapier\\\", \\\"Make.com\\\", \\\"Workato\\\", \\\"Parabola\\\"\\n- \\\"GTM stack\\\", \\\"GTM tooling\\\", \\\"sales tech stack\\\"\\n- \\\"AI sales\\\", \\\"sales AI\\\", \\\"RevOps AI\\\"\\n- \\\"build vs buy\\\", \\\"in-house tooling\\\", \\\"custom automation\\\"\\n\\nSCORE = A + B + C + D (integer, max 100). No arbitrary bonus.\\n\\nHARD DISQUALIFICATIONS (closed list, 5 items). If you disqualify, cite a number from 1 to 5. Otherwise do NOT disqualify.\\n#1. Title: investor, advisor, board member, VC, angel, mentor\\n#2. Title: recruiter, talent acquisition (unless explicitly combined with a T1 or T2 role, for example \\\"Head of Sales & Recruiting\\\")\\n#3. Left the company: \\\"Former\\\", \\\"Past at\\\", or an end date on the current role\\n#4. Location outside France: the location mentions neither France nor a French city or region (Paris, Lyon, Marseille, Bordeaux, Toulouse, Lille, Nantes, Rennes, Strasbourg, Nice, Grenoble, Montpellier, Sophia Antipolis, Aix-en-Provence, Ile-de-France, Hauts-de-France)\\n#5. Not a decision-maker (no T1, T2, T3 or T4 match): SDR or BDR manager, sales ops manager, outbound manager, senior or regular AE, SDR, other individual contributors without budget\\n\\nELIGIBILITY: is_persona = true ONLY IF:\\n1. score >= 50 (strict sum A + B + C + D)\\n2. AND tier is 1, 2, 3 or 4\\n3. AND no hard disqualification applies\\n\\nOUTPUT: STRICT JSON\\n- ONE JSON block in your answer. Never two.\\n- No text before or after the JSON. No prose. No markdown.\\n- If you detect a math error, rewrite the single JSON block.\\n\\nExact format:\\n{\\\"is_persona\\\": bool, \\\"tier\\\": 1|2|3|4|null, \\\"score\\\": 0-100, \\\"score_breakdown\\\": {\\\"tier_pts\\\": N, \\\"tenure_pts\\\": N, \\\"concurrence_pts\\\": N, \\\"signals_pts\\\": N}, \\\"reason\\\": \\\"<tier T<N> X pts> + <tenure Y pts> + <in-house Z pts> + <signals W pts> = <total>. Disqualification: <#N or none>\\\", \\\"rice_preview\\\": \\\"<one sentence: likely motivation and communication style, to confirm in conversation>\\\", \\\"disqualif_number\\\": \\\"1-5 or null\\\", \\\"tenure_months\\\": N}\", cache_control: { type: 'ephemeral' } }, { type: 'text', text: '\\n\\nAUDIT: check the previous Haiku verdict and fix it if it is wrong.\\nPrevious Haiku verdict: ' + JSON.stringify($json._verdict || {}) + '\\n\\nINPUT:\\n- profile_data: ' + JSON.stringify($json).slice(0, 6000) + '\\n- company_employees (for criterion C): ' + JSON.stringify(($('7. Apify — Company Employees batch').all() || []).map(e => ({title: e.json?.title || e.json?.headline, name: e.json?.firstName + ' ' + e.json?.lastName})).slice(0, 50)) }] }] }) }}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 500
+            }
+          },
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          },
+          "timeout": 60000
+        }
+      },
+      "id": "c802f890-2afb-5c5e-b0ef-22465c78b446",
+      "name": "10.8 Sonnet re-qualify (doubts only)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        800,
+        96
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "Anthropic API (x-api-key)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "\nfunction findLastValidJson(text) {\n  if (!text) return null;\n  const blocks = []; let depth = 0, start = -1;\n  for (let i = 0; i < text.length; i++) {\n    if (text[i] === '{') { if (depth === 0) start = i; depth++; }\n    else if (text[i] === '}') { depth--; if (depth === 0 && start >= 0) { blocks.push([start, i + 1]); start = -1; } }\n  }\n  for (let i = blocks.length - 1; i >= 0; i--) {\n    try {\n      const obj = JSON.parse(text.substring(blocks[i][0], blocks[i][1]));\n      if (obj && typeof obj === 'object' && 'is_persona' in obj) return obj;\n    } catch (e) {}\n  }\n  return null;\n}\nfunction clamp(n, min, max) { const x = typeof n === 'number' ? n : 0; return Math.max(min, Math.min(max, x)); }\n\nconst all = $input.all();\nconst out = [];\nfor (let i = 0; i < all.length; i++) {\n  const item = all[i];\n  const t = item.json?.content?.[0]?.text || '';\n  const v = findLastValidJson(t) || {};\n  const orig = $('10.7 IF doubt → Sonnet').itemMatching(i)?.json || {};\n\n  const bk = v.score_breakdown || {};\n  const tier_pts = clamp(bk.tier_pts, 0, 40);\n  const tenure_pts = clamp(bk.tenure_pts, 0, 20);\n  const concurrence_pts = clamp(bk.concurrence_pts, 0, 15);\n  const signals_pts = clamp(bk.signals_pts, 0, 25);\n  const sum = tier_pts + tenure_pts + concurrence_pts + signals_pts;\n\n  const disqNum = v.disqualif_number && /^[1-5]$/.test(String(v.disqualif_number).trim()) ? String(v.disqualif_number).trim() : null;\n  const tier = (typeof v.tier === 'number' && v.tier >= 1 && v.tier <= 4) ? v.tier : null;\n  const score = disqNum ? 0 : sum;\n  const is_persona = !disqNum && score >= 50 && tier !== null;\n\n  const tier_keys = { 1: '1_cro_vp_sales', 2: '2_director_of_sales', 3: '3_revops_lead', 4: '4_ceo_fallback' };\n\n  // Override Haiku verdict with Sonnet's\n  out.push({\n    json: {\n      ...orig,\n      _verdict: {\n        is_persona, score, tier,\n        tier_key: tier ? tier_keys[tier] : '',\n        score_breakdown: { tier_pts, tenure_pts, concurrence_pts, signals_pts },\n        reason: '[SONNET REVIEW] ' + (v.reason || ''),\n        rice_preview: v.rice_preview || '',\n        disqualif_number: disqNum,\n        tenure_months: typeof v.tenure_months === 'number' ? v.tenure_months : null,\n        _doubt: false,\n        _reviewed_by: 'sonnet',\n        _audit: {\n          ...(orig._verdict?._audit || {}),\n          sonnet_score: typeof v.score === 'number' ? v.score : null,\n          sonnet_is_persona: v.is_persona === true,\n          sonnet_breakdown: bk,\n          haiku_was_wrong: orig._verdict?.is_persona !== is_persona,\n        },\n      },\n    },\n  });\n}\nreturn out;\n"
+      },
+      "id": "e146c3b3-36fc-51d8-bc1a-ad5ac21d7f68",
+      "name": "10.9 Parse Sonnet + Override",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        992,
+        96
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "0b399f14-ce08-5011-9e9c-74c4816ed1f3",
+      "name": "10.95 Merge confident + reviewed",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.1,
+      "position": [
+        1392,
+        224
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/companies/search",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ filterGroups: [{ filters: [{ propertyName: 'tam_status', operator: 'EQ', value: 'qualified' }, { propertyName: 'persona_enrichment_status', operator: 'NOT_HAS_PROPERTY' }] }], properties: ['tam_domain'], limit: 1 }) }}",
+        "options": {}
+      },
+      "id": "53626e20-25ba-5df9-85f3-2917fb8c7372",
+      "name": "1.5 HS Count remaining",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -2720,
+        160
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "HubSpot private app (Bearer)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst total = $input.first().json.total || 0;\nconst batchSize = $('1c. Normalize Input').first().json.batch_size || 0;\nreturn [{ json: { remaining: total, batch_size: batchSize, run_id: $('1c. Normalize Input').first().json.run_id } }];\n"
+      },
+      "id": "018ae618-bf5b-59ce-9aef-2877218b7302",
+      "name": "1.6 Parse count",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2560,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_SLACK_CHANNEL_ID_MONITORING"
+        },
+        "text": "={{ $json.remaining === 0 ? '🛑 *Flow 2 — Persona Enricher* arrêté\\n*0 companies à enrichir* (qualified avec persona_enrichment_status vide).\\nLance Flow 4 pour qualifier plus de companies.' : '🚀 *Flow 2 — Persona Enricher* started\\n*Companies à enrichir:* ' + $json.remaining + ' (qualified, persona_enrichment_status null)\\n*Batch size:* ' + $json.batch_size + '\\n*Run:* ' + $json.run_id }}",
+        "otherOptions": {}
+      },
+      "id": "c378a2d9-afab-571a-9f8b-bf9bf664d857",
+      "name": "1.7 Slack — count notify",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        -2448,
+        -64
+      ],
+      "webhookId": "2b535e73-3746-5ff1-887e-18e92c0cdfde",
+      "credentials": {
+        "slackApi": {
+          "id": null,
+          "name": "Slack bot"
+        }
+      },
+      "executeOnce": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "has-companies",
+              "leftValue": "={{ $json.remaining }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "4f42d6d5-3889-5729-a882-a4645d252404",
+      "name": "1.8 IF remaining > 0",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -2416,
+        176
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "08aa6cf8-7e86-5bbe-aff9-07a2b60920a3",
+      "name": "Merge_final (qualified + dropped)",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.1,
+      "position": [
+        2272,
+        288
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const companies = $('6.5 Aggregate companies for batch').first().json.companies || [];\nconst inputs = companies\n  .filter(c => c.hs_id)\n  .map(c => ({ id: c.hs_id, properties: { persona_enrichment_status: 'done' } }));\nif (!inputs.length) return [];\nreturn [{ json: { body: { inputs } } }];"
+      },
+      "id": "889f01df-99cc-5e2f-979a-acea53138d13",
+      "name": "14b. Prepare batch mark all done",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -496,
+        -192
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/companies/batch/update",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 2000
+            }
+          },
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "5630d2fd-c5eb-51f2-8dea-f49580243d24",
+      "name": "14c. PATCH HS Company batch enriched",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -272,
+        -208
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": null,
+          "name": "HubSpot private app (Bearer)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "has-items",
+              "leftValue": "={{ $input.all().length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "529e8ed4-6556-5b25-ba67-2e3c89fa0a42",
+      "name": "7e. IF Apify items > 0",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -800,
+        224
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_SLACK_CHANNEL_ID_MONITORING"
+        },
+        "text": "={{ '⚠️ *Flow 2 — Apify Employees a renvoyé 0 résultats*\\n*Run:* ' + ($('1c. Normalize Input').first().json.run_id || '?') + '\\n*Companies tentées:* ' + ($('6.5 Aggregate companies for batch').first().json.companies?.length || 0) + '\\n_Cause probable: limite 10 companies max en mode all_at_once dépassée, ou actor erreur. Companies non marquées done — seront re-tentées au prochain run._' }}",
+        "otherOptions": {}
+      },
+      "id": "baee5e4e-314d-5346-9d89-3bc846f5efff",
+      "name": "7e. Slack — Apify empty alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        -656,
+        448
+      ],
+      "webhookId": "483abb1e-b063-50a3-8e36-2cd61b6e3e70",
+      "credentials": {
+        "slackApi": {
+          "id": null,
+          "name": "Slack bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const all = $input.all();\n\nconst byCompany = {};\nfor (const item of all) {\n  const slug = item.json._company_slug || item.json._company_hs_id || '__unknown__';\n  if (!byCompany[slug]) byCompany[slug] = [];\n  byCompany[slug].push(item);\n}\n\nconst T1_TIER = '1_cro_vp_sales';\nconst T2_TIER = '2_director_of_sales';\nconst T3_TIER = '3_revops_lead';\nconst T4_TIER = '4_ceo_fallback';\nconst HIGHER_TIERS = new Set([T1_TIER, T2_TIER, T3_TIER]);\n\n// Defense layer 3: even if Haiku assigned T4 to a technical co-founder, reject promotion.\nconst technicalRoleRegex = /(\\bCTO\\b|Chief\\s+Technology|Chief\\s+Product|Chief\\s+Financial|Chief\\s+Marketing|Chief\\s+Operating|\\bCPO\\b|\\bCFO\\b|\\bCMO\\b|\\bCOO\\b|VP\\s+(?:of\\s+)?(?:Engineering|Product(?!\\s+Marketing)|Tech|Marketing|Finance|People|HR|Operations)|Head\\s+of\\s+(?:Engineering|Product|Tech|Marketing|Finance|People|HR|Operations|Design)|Director\\s+of\\s+(?:Engineering|Product|Tech|Marketing|Finance|People|HR|Operations|Design))/i;\n\n// \"Head of GTM\" pattern — T2 conditional (only if no T1 in company)\nconst gtmTitleRegex = /(Head\\s+of\\s+GTM|Head\\s+of\\s+Go[- ]?to[- ]?Market|Director\\s+of\\s+GTM|VP\\s+(?:of\\s+)?GTM)/i;\n\nfunction getTitleHaystack(j) {\n  const parts = [j.title, j.headline, j.currentPositions?.[0]?.position, j.currentPositions?.[0]?.title].filter(Boolean);\n  return parts.join(' || ');\n}\nfunction isTechnicalRole(j) { return technicalRoleRegex.test(getTitleHaystack(j)); }\nfunction isGtmTitle(j) { return gtmTitleRegex.test(getTitleHaystack(j)); }\n\nconst out = [];\n\nfor (const slug in byCompany) {\n  const group = byCompany[slug];\n\n  // Step 1: detect if a T1 (Head of Sales / CRO / etc.) is qualified in this company\n  const hasT1Qualified = group.some(it => {\n    const v = it.json._verdict || {};\n    return v.is_persona && v.tier_key === T1_TIER;\n  });\n\n  // Step 2: if T1 exists, demote any qualified Head of GTM (T2 conditional) to disqualified\n  if (hasT1Qualified) {\n    for (const item of group) {\n      const v = item.json._verdict || {};\n      if (v.is_persona && v.tier_key === T2_TIER && isGtmTitle(item.json)) {\n        item.json._verdict = {\n          ...v,\n          is_persona: false,\n          _t2_gtm_demoted: true,\n          reason: '[T2 GTM DEMOTED] Head of GTM/Go-to-Market désactivé car un T1 (Head of Sales/CRO/etc.) est qualifié dans la même company. Priorité : toujours T1 > Head of GTM. Original: ' + (v.reason || '')\n        };\n      }\n    }\n  }\n\n  // Step 3: existing T4 fallback override (skip if any HIGHER_TIER qualified, including just-demoted T2-GTM still considered if was qualified)\n  const hasHigherQualified = group.some(it => {\n    const v = it.json._verdict || {};\n    return v.is_persona && HIGHER_TIERS.has(v.tier_key);\n  });\n\n  if (!hasHigherQualified) {\n    const t4Cands = group\n      .filter(it => it.json._verdict?.tier_key === T4_TIER)\n      .filter(it => !isTechnicalRole(it.json))\n      .sort((a, b) => (b.json._verdict?.score || 0) - (a.json._verdict?.score || 0));\n\n    if (t4Cands.length > 0) {\n      const chosen = t4Cands[0];\n      const orig = chosen.json._verdict || {};\n      chosen.json._verdict = {\n        ...orig,\n        is_persona: true,\n        _t4_fallback_promoted: true,\n        reason: '[T4 FALLBACK PROMOTED] No T1/T2/T3 qualified in company. CEO/Founder selected as decision-maker fallback (technical co-founders excluded). Original Haiku verdict: ' + (orig.reason || ''),\n      };\n    }\n  }\n  out.push(...group);\n}\nreturn out;"
+      },
+      "id": "223a3814-4ffa-5304-9993-176f0a2aeed0",
+      "name": "10.96 T1 priority + T4 fallback override",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1600,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Pre-build per-company employees context. KEY FIX: filter employees by\n// target company slug, so Haiku doesn't see cross-company contaminated data\n// (Apify returns some employees from other companies via LinkedIn cross-matches).\n\nconst allEmployees = $('7d. Dedup employees').all() || [];\n\nfunction extractSlug(url) {\n  return ((url || '').toLowerCase().split('/company/')[1] || '').split('/')[0].split('?')[0];\n}\nfunction getEmployeeCompanySlug(j) {\n  const cp = (j.currentPositions && j.currentPositions[0]) || {};\n  return extractSlug(cp.companyLinkedinUrl || cp.companyUrl || j.currentCompany?.linkedinUrl || j.currentCompany?.url || '');\n}\n\n// Group all employees by their CURRENT company slug (= the slug visible in their currentPositions)\nconst employeesBySlug = {};\nfor (const e of allEmployees) {\n  const j = e.json || {};\n  const slug = getEmployeeCompanySlug(j);\n  if (!slug) continue;\n  if (!employeesBySlug[slug]) employeesBySlug[slug] = [];\n  employeesBySlug[slug].push({\n    title: (j.title || j.headline || j.currentPositions?.[0]?.position || '').slice(0, 100),\n    name: ((j.firstName || '') + ' ' + (j.lastName || '')).trim()\n  });\n}\n\n// Cap each company list to 60 (avoid prompt bloat)\nfor (const slug in employeesBySlug) {\n  employeesBySlug[slug] = employeesBySlug[slug].slice(0, 60);\n}\n\nconst out = [];\nfor (const item of $input.all()) {\n  const j = item.json;\n\n  // Get THIS persona's company slug → fetch only employees of THAT company\n  const personaSlug = j._company_slug || '';\n  const companyEmployees = employeesBySlug[personaSlug] || [];\n\n  const profileForHaiku = {\n    firstName: j.firstName,\n    lastName: j.lastName,\n    headline: j.headline,\n    location: typeof j.location === 'object' ? (j.location?.linkedinText || j.location?.parsed?.text) : j.location,\n    currentPositions: (j.currentPositions || []).slice(0, 3).map(p => ({\n      position: p.position || p.title,\n      companyName: p.companyName,\n      dateRange: p.dateRange,\n      duration: p.duration,\n    })),\n    about: (j.about || '').slice(0, 1500),\n    _company_name: j._company_name,\n    _company_hs_id: j._company_hs_id,\n    _company_slug: j._company_slug,\n    linkedinUrl: j.linkedinUrl,\n  };\n\n  out.push({\n    json: {\n      ...j,\n      _profileForHaiku: JSON.stringify(profileForHaiku),\n      _employeesJson: JSON.stringify(companyEmployees),\n      _employeesCount: companyEmployees.length\n    }\n  });\n}\nreturn out;"
+      },
+      "id": "cff58301-0f58-5cea-89bb-a960d36659e2",
+      "name": "9.6 Pre-build Haiku context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -224,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "Run actor and get dataset",
+        "actorId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "harvestapi~linkedin-company-employees"
+        },
+        "customBody": "={{ JSON.stringify({ companies: $('6.6 Filter for Run B').first().json.companies.map(c => c.url), maxItems: 1500, maxItemsPerCompany: 100, locations: ['105015875'], companyBatchMode: 'all_at_once', profileScraperMode: 'Short ($4 per 1k)', jobTitles: [\"SDR\", \"Sales Development Representative\", \"BDR\", \"Business Development Representative\", \"Customer Success Manager\", \"CSM\", \"Sales Lead\", \"Senior Account Executive\", \"Commercial\", \"GTM Engineer\", \"GTM Specialist\", \"RevOps Engineer\", \"Revenue Operations Engineer\", \"Sales Ops Engineer\", \"Sales Operations Engineer\", \"Growth Engineer\", \"Growth Hacker\", \"Growth Lead\", \"Automation Engineer\", \"Marketing Automation\"] }) }}"
+      },
+      "id": "777cea3f-b925-5ffd-b012-dd0392359365",
+      "name": "7b. Apify — Concurrence + entry sales",
+      "type": "@apify/n8n-nodes-apify.apify",
+      "typeVersion": 1,
+      "position": [
+        -1360,
+        336
+      ],
+      "credentials": {
+        "apifyApi": {
+          "id": null,
+          "name": "Apify"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "bc80a882-802c-5dbe-bcf3-5c48e0b342a1",
+      "name": "7c. Merge employees (A+B)",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        -1200,
+        176
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Dedup employees by linkedinUrl (some profiles may match BOTH Run A and Run B titles)\nconst seen = new Set();\nconst out = [];\nfor (const item of $input.all()) {\n  const j = item.json;\n  const url = (j.linkedinUrl || j.profileUrl || '').toLowerCase();\n  if (!url || seen.has(url)) continue;\n  seen.add(url);\n  out.push(item);\n}\nreturn out;"
+      },
+      "id": "9fa4773e-545b-5563-9586-0929409535c5",
+      "name": "7d. Dedup employees",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1008,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 0 6 * * *"
+            },
+            {
+              "field": "cronExpression",
+              "expression": "0 0 7 * * *"
+            },
+            {
+              "field": "cronExpression",
+              "expression": "0 0 8 * * *"
+            },
+            {
+              "field": "cronExpression",
+              "expression": "0 0 9 * * *"
+            },
+            {
+              "field": "cronExpression",
+              "expression": "0 0 10 * * *"
+            },
+            {
+              "field": "cronExpression",
+              "expression": "0 0 11 * * *"
+            },
+            {
+              "field": "cronExpression",
+              "expression": "0 0 12 * * *"
+            },
+            {
+              "field": "cronExpression",
+              "expression": "0 0 13 * * *"
+            },
+            {
+              "field": "cronExpression",
+              "expression": "0 0 14 * * *"
+            },
+            {
+              "field": "cronExpression",
+              "expression": "0 0 15 * * *"
+            }
+          ]
+        }
+      },
+      "id": "742c2f38-e799-5590-9a3f-67258fd66321",
+      "name": "Schedule hourly (working hours)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -3264,
+        368
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "{\"body\": {\"batch_size\": 10, \"source\": \"schedule-daily\"}}",
+        "options": {}
+      },
+      "id": "4f1350fd-498e-56e1-94f9-8cfb6f4b17f3",
+      "name": "Schedule defaults",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -3088,
+        368
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 6.6 Filter — keep only companies where Run A returned ≥1 decision-maker.\n// Saves Apify cost on Run B by skipping companies that won't qualify.\n\nconst employees = $('7. Apify — Company Employees batch').all().map(x => x.json);\nconst allCompanies = $('6.5 Aggregate companies for batch').first().json.companies || [];\n\nfunction norm(s) { return String(s || '').toLowerCase().trim(); }\n\nfunction getCoName(e) {\n  if (Array.isArray(e.currentPositions) && e.currentPositions[0]) {\n    return norm(e.currentPositions[0].companyName);\n  }\n  // Fallback: singular currentPosition (older shape)\n  if (Array.isArray(e.currentPosition) && e.currentPosition[0]) {\n    return norm(e.currentPosition[0].companyName || e.currentPosition[0].company);\n  }\n  return norm(e.companyName || e.company);\n}\n\nconst empCount = {};\nfor (const e of employees) {\n  const co = getCoName(e);\n  if (!co) continue;\n  empCount[co] = (empCount[co] || 0) + 1;\n}\n\nconst filtered = allCompanies.filter(c => {\n  const co = norm(c.name);\n  return empCount[co] && empCount[co] > 0;\n});\n\n// Fallback: if filter matched 0 companies (e.g. Apify response shape changed),\n// keep all companies to avoid breaking the pipeline.\nconst finalList = filtered.length > 0 ? filtered : allCompanies;\n\nreturn [{ json: {\n  companies: finalList,\n  filtered_count: filtered.length,\n  total_count: allCompanies.length,\n  saved: allCompanies.length - filtered.length,\n  fallback_used: filtered.length === 0\n}}];"
+      },
+      "id": "42100738-40a1-5d2c-be04-3e0df7d6638d",
+      "name": "6.6 Filter for Run B",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1536,
+        336
+      ]
+    }
+  ],
+  "connections": {
+    "1. Form Trigger": {
+      "main": [
+        [
+          {
+            "node": "1c. Normalize Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "1c. Normalize Input": {
+      "main": [
+        [
+          {
+            "node": "1.5 HS Count remaining",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "M1. Slack — Flow 2 finished",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "2. HS Search qualified+pending": {
+      "main": [
+        [
+          {
+            "node": "2b. Split companies → items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "2b. Split companies → items": {
+      "main": [
+        [
+          {
+            "node": "6.5 Aggregate companies for batch",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "M2. Slack — companies fetched",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "6.5 Aggregate companies for batch": {
+      "main": [
+        [
+          {
+            "node": "7. Apify — Company Employees batch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "7. Apify — Company Employees batch": {
+      "main": [
+        [
+          {
+            "node": "7c. Merge employees (A+B)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "6.6 Filter for Run B",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "8. Filter title (FR + target titles)": {
+      "main": [
+        [
+          {
+            "node": "9.6 Pre-build Haiku context",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "M3. Slack — title filter done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "10. Qualify + Score Persona (Haiku)": {
+      "main": [
+        [
+          {
+            "node": "10.5 Parse persona verdict",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "10.5 Parse persona verdict": {
+      "main": [
+        [
+          {
+            "node": "10.7 IF doubt → Sonnet",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "M5. Slack — scoring done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "11. IF persona qualified": {
+      "main": [
+        [
+          {
+            "node": "13. Auto-trigger Flow 1 brief",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Merge_final (qualified + dropped)",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "13. Auto-trigger Flow 1 brief": {
+      "main": [
+        [
+          {
+            "node": "Merge_final (qualified + dropped)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "E_format_done": {
+      "main": [
+        [
+          {
+            "node": "E_slack_done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "1w. Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "1r. Respond OK",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "1c. Normalize Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "1.5 HS Count remaining": {
+      "main": [
+        [
+          {
+            "node": "1.6 Parse count",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "1.6 Parse count": {
+      "main": [
+        [
+          {
+            "node": "1.7 Slack — count notify",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "1.8 IF remaining > 0",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "1.8 IF remaining > 0": {
+      "main": [
+        [
+          {
+            "node": "2. HS Search qualified+pending",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "7.5 Detect concurrence interne": {
+      "main": [
+        [
+          {
+            "node": "8. Filter title (FR + target titles)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "7.6 Extract concurrence companies",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "14b. Prepare batch mark all done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "7.6 Extract concurrence companies": {
+      "main": [
+        [
+          {
+            "node": "7.7 PATCH HS Company disqualif (concurrence)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "7.7 PATCH HS Company disqualif (concurrence)": {
+      "main": [
+        [
+          {
+            "node": "M_concurrence Slack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "10.7 IF doubt → Sonnet": {
+      "main": [
+        [
+          {
+            "node": "10.8 Sonnet re-qualify (doubts only)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "10.95 Merge confident + reviewed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "10.8 Sonnet re-qualify (doubts only)": {
+      "main": [
+        [
+          {
+            "node": "10.9 Parse Sonnet + Override",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "10.9 Parse Sonnet + Override": {
+      "main": [
+        [
+          {
+            "node": "10.95 Merge confident + reviewed",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "10.95 Merge confident + reviewed": {
+      "main": [
+        [
+          {
+            "node": "10.96 T1 priority + T4 fallback override",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge_final (qualified + dropped)": {
+      "main": [
+        [
+          {
+            "node": "E_format_done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "14b. Prepare batch mark all done": {
+      "main": [
+        [
+          {
+            "node": "14c. PATCH HS Company batch enriched",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "7e. IF Apify items > 0": {
+      "main": [
+        [
+          {
+            "node": "7.5 Detect concurrence interne",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "7e. Slack — Apify empty alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "10.96 T1 priority + T4 fallback override": {
+      "main": [
+        [
+          {
+            "node": "11. IF persona qualified",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "9.6 Pre-build Haiku context": {
+      "main": [
+        [
+          {
+            "node": "10. Qualify + Score Persona (Haiku)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "7b. Apify — Concurrence + entry sales": {
+      "main": [
+        [
+          {
+            "node": "7c. Merge employees (A+B)",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "7c. Merge employees (A+B)": {
+      "main": [
+        [
+          {
+            "node": "7d. Dedup employees",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "7d. Dedup employees": {
+      "main": [
+        [
+          {
+            "node": "7e. IF Apify items > 0",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule defaults": {
+      "main": [
+        [
+          {
+            "node": "1c. Normalize Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "6.6 Filter for Run B": {
+      "main": [
+        [
+          {
+            "node": "7b. Apify — Concurrence + entry sales",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule hourly (working hours)": {
+      "main": [
+        [
+          {
+            "node": "Schedule defaults",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  }
+}
